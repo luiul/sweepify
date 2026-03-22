@@ -113,6 +113,10 @@ def _parse_track(track: dict, added_at: str | None = None) -> tuple[Song, list[s
         artist=artist_names,
         album=track["album"]["name"],
         added_at=added_at,
+        popularity=track.get("popularity"),
+        duration_ms=track.get("duration_ms"),
+        explicit=track.get("explicit"),
+        release_date=track.get("album", {}).get("release_date"),
     )
     return song, artist_ids
 

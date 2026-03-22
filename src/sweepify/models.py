@@ -81,10 +81,10 @@ class Song(BaseModel):
     album: str | None = None
     genres: str | None = None
     added_at: str | None = None
-    energy: float | None = None
-    valence: float | None = None
-    tempo: float | None = None
-    danceability: float | None = None
+    popularity: int | None = None
+    duration_ms: int | None = None
+    explicit: bool | None = None
+    release_date: str | None = None
     classified: bool = False
     playlist_id: str | None = None
     category: str | None = None

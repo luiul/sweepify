@@ -170,3 +170,14 @@ def reset():
     """Clear all classification data (keeps songs)."""
     count = db.reset_classifications()
     click.echo(f"Reset {count} song(s). Playlists cleared.")
+
+
+@main.command()
+def ui():
+    """Open the interactive database explorer (Streamlit)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    app_path = Path(__file__).parent / "ui.py"
+    subprocess.run([sys.executable, "-m", "streamlit", "run", str(app_path)], check=True)
