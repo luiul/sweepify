@@ -12,7 +12,17 @@ def main():
 @main.command()
 def fetch():
     """Fetch liked songs from Spotify and store locally."""
-    click.echo("Not implemented yet.")
+    from mapa import spotify
+
+    click.echo("Connecting to Spotify...")
+    sp = spotify.get_client()
+
+    click.echo("Fetching liked songs...")
+    songs = spotify.fetch_liked_songs(sp)
+    click.echo(f"Fetched {len(songs)} songs from Spotify.")
+
+    count = db.upsert_songs(songs)
+    click.echo(f"Added {count} new song(s) to local database.")
 
 
 @main.command()
