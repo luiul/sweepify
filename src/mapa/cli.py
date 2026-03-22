@@ -9,9 +9,8 @@ def main():
     db.init_db()
 
 
-@main.command()
-def fetch():
-    """Fetch liked songs from Spotify and store locally."""
+def _fetch() -> int:
+    """Fetch liked songs. Returns number of new songs added."""
     from mapa import spotify
 
     click.echo("Connecting to Spotify...")
@@ -19,21 +18,21 @@ def fetch():
 
     click.echo("Fetching liked songs...")
     songs = spotify.fetch_liked_songs(sp)
-    click.echo(f"Fetched {len(songs)} songs from Spotify.")
+    click.echo(f"Fetched {len(songs)} song(s) from Spotify.")
 
     count = db.upsert_songs(songs)
     click.echo(f"Added {count} new song(s) to local database.")
+    return count
 
 
-@main.command()
-def classify():
-    """Classify unclassified songs using Claude."""
+def _classify() -> int:
+    """Classify unclassified songs. Returns number of songs classified."""
     from mapa import classifier
 
     songs = db.get_unclassified_songs()
     if not songs:
-        click.echo("No unclassified songs found. Run 'mapa fetch' first.")
-        return
+        click.echo("No unclassified songs found.")
+        return 0
 
     click.echo(f"Classifying {len(songs)} song(s) with Claude...")
     client = classifier.get_client()
@@ -41,23 +40,22 @@ def classify():
 
     for cat in result.categories:
         click.echo(f"  {cat.name}: {len(cat.song_ids)} song(s)")
-        # Mark songs as classified with a placeholder playlist_id (created later)
         db.mark_classified(cat.song_ids, cat.name, playlist_id="")
 
     total = sum(len(c.song_ids) for c in result.categories)
     click.echo(f"Classified {total} song(s) into {len(result.categories)} categories.")
+    return total
 
 
-@main.command()
-def create():
-    """Create Spotify playlists and add classified songs."""
+def _create() -> int:
+    """Create playlists. Returns number of playlists processed."""
     from mapa import spotify
     from mapa.models import Playlist
 
     songs_by_cat = db.get_songs_by_category()
     if not songs_by_cat:
-        click.echo("No classified songs pending playlist creation. Run 'mapa classify' first.")
-        return
+        click.echo("No classified songs pending playlist creation.")
+        return 0
 
     click.echo("Connecting to Spotify...")
     sp = spotify.get_client()
@@ -77,13 +75,53 @@ def create():
 
         db.mark_classified(song_ids, category, playlist_id)
 
-    click.echo(f"Done. Processed {len(songs_by_cat)} playlist(s).")
+    click.echo(f"Processed {len(songs_by_cat)} playlist(s).")
+    return len(songs_by_cat)
+
+
+@main.command()
+def fetch():
+    """Fetch liked songs from Spotify and store locally."""
+    _fetch()
+
+
+@main.command()
+def classify():
+    """Classify unclassified songs using Claude."""
+    _classify()
+
+
+@main.command()
+def create():
+    """Create Spotify playlists and add classified songs."""
+    _create()
 
 
 @main.command()
 def run():
     """Run full pipeline: fetch → classify → create."""
-    click.echo("Not implemented yet.")
+    click.echo("=== Step 1/3: Fetch ===")
+    try:
+        _fetch()
+    except Exception as e:
+        click.echo(f"Error during fetch: {e}", err=True)
+        raise click.Abort()
+
+    click.echo("\n=== Step 2/3: Classify ===")
+    try:
+        _classify()
+    except Exception as e:
+        click.echo(f"Error during classify: {e}", err=True)
+        raise click.Abort()
+
+    click.echo("\n=== Step 3/3: Create Playlists ===")
+    try:
+        _create()
+    except Exception as e:
+        click.echo(f"Error during playlist creation: {e}", err=True)
+        raise click.Abort()
+
+    click.echo("\nDone! Run 'mapa status' to see a summary.")
 
 
 @main.command()
