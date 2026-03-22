@@ -28,7 +28,24 @@ def fetch():
 @main.command()
 def classify():
     """Classify unclassified songs using Claude."""
-    click.echo("Not implemented yet.")
+    from mapa import classifier
+
+    songs = db.get_unclassified_songs()
+    if not songs:
+        click.echo("No unclassified songs found. Run 'mapa fetch' first.")
+        return
+
+    click.echo(f"Classifying {len(songs)} song(s) with Claude...")
+    client = classifier.get_client()
+    result = classifier.classify_songs(client, songs)
+
+    for cat in result.categories:
+        click.echo(f"  {cat.name}: {len(cat.song_ids)} song(s)")
+        # Mark songs as classified with a placeholder playlist_id (created later)
+        db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+
+    total = sum(len(c.song_ids) for c in result.categories)
+    click.echo(f"Classified {total} song(s) into {len(result.categories)} categories.")
 
 
 @main.command()
