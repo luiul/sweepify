@@ -1,56 +1,76 @@
 import click
 
-from mapa import db
+from sweepify import db
 
 
 @click.group()
 def main():
-    """mapa — Classify your Spotify Liked Songs into playlists using AI."""
+    """sweepify — Classify your Spotify Liked Songs into playlists using AI."""
     db.init_db()
 
 
-def _fetch() -> int:
-    """Fetch liked songs. Returns number of new songs added."""
-    from mapa import spotify
+def _fetch(playlist: str | None = None) -> list[str]:
+    """Fetch songs. Returns list of fetched song IDs."""
+    from sweepify import spotify
 
     click.echo("Connecting to Spotify...")
     sp = spotify.get_client()
 
-    click.echo("Fetching liked songs...")
-    songs = spotify.fetch_liked_songs(sp)
+    source = f"playlist '{playlist}'" if playlist else "Liked Songs"
+    click.echo(f"Fetching songs from {source}...")
+    songs = spotify.fetch_liked_songs(sp, playlist=playlist)
     click.echo(f"Fetched {len(songs)} song(s) from Spotify.")
 
     count = db.upsert_songs(songs)
     click.echo(f"Added {count} new song(s) to local database.")
-    return count
+    return [s.spotify_id for s in songs]
 
 
-def _classify() -> int:
-    """Classify unclassified songs. Returns number of songs classified."""
-    from mapa import classifier
+def _classify(song_ids: list[str] | None = None) -> int:
+    """Classify unclassified songs. Returns number of songs classified.
+
+    If song_ids is provided, only classify those songs (that are also unclassified).
+    """
+    from sweepify import classifier
 
     songs = db.get_unclassified_songs()
+    if song_ids is not None:
+        allowed = set(song_ids)
+        songs = [s for s in songs if s.spotify_id in allowed]
+
     if not songs:
         click.echo("No unclassified songs found.")
         return 0
 
     click.echo(f"Classifying {len(songs)} song(s) with Claude...")
     client = classifier.get_client()
-    result = classifier.classify_songs(client, songs)
+    classified_count = 0
 
+    def on_progress(batch: int, total: int, size: int) -> None:
+        click.echo(f"  Batch {batch}/{total} ({size} songs)...")
+
+    def on_batch_done(result: classifier.ClassificationResult) -> None:
+        nonlocal classified_count
+        for cat in result.categories:
+            db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+            classified_count += len(cat.song_ids)
+
+    result = classifier.classify_songs(
+        client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
+    )
+
+    click.echo("Categories:")
     for cat in result.categories:
         click.echo(f"  {cat.name}: {len(cat.song_ids)} song(s)")
-        db.mark_classified(cat.song_ids, cat.name, playlist_id="")
 
-    total = sum(len(c.song_ids) for c in result.categories)
-    click.echo(f"Classified {total} song(s) into {len(result.categories)} categories.")
-    return total
+    click.echo(f"Classified {classified_count} song(s) into {len(result.categories)} categories.")
+    return classified_count
 
 
 def _create() -> int:
     """Create playlists. Returns number of playlists processed."""
-    from mapa import spotify
-    from mapa.models import Playlist
+    from sweepify import spotify
+    from sweepify.models import Playlist
 
     songs_by_cat = db.get_songs_by_category()
     if not songs_by_cat:
@@ -80,15 +100,24 @@ def _create() -> int:
 
 
 @main.command()
-def fetch():
+@click.option("--playlist", "-p", default=None, help="Fetch from a specific playlist (name or ID) instead of Liked Songs.")
+def fetch(playlist: str | None):
     """Fetch liked songs from Spotify and store locally."""
-    _fetch()
+    _fetch(playlist=playlist)
 
 
 @main.command()
-def classify():
+@click.option("--playlist", "-p", default=None, help="Only classify songs from this playlist (name or ID).")
+def classify(playlist: str | None):
     """Classify unclassified songs using Claude."""
-    _classify()
+    song_ids = None
+    if playlist:
+        from sweepify import spotify
+        click.echo("Resolving playlist...")
+        sp = spotify.get_client()
+        songs = spotify.fetch_liked_songs(sp, playlist=playlist)
+        song_ids = [s.spotify_id for s in songs]
+    _classify(song_ids=song_ids)
 
 
 @main.command()
@@ -98,18 +127,19 @@ def create():
 
 
 @main.command()
-def run():
+@click.option("--playlist", "-p", default=None, help="Fetch from a specific playlist instead of Liked Songs.")
+def run(playlist: str | None):
     """Run full pipeline: fetch → classify → create."""
     click.echo("=== Step 1/3: Fetch ===")
     try:
-        _fetch()
+        fetched_ids = _fetch(playlist=playlist)
     except Exception as e:
         click.echo(f"Error during fetch: {e}", err=True)
         raise click.Abort()
 
     click.echo("\n=== Step 2/3: Classify ===")
     try:
-        _classify()
+        _classify(song_ids=fetched_ids if playlist else None)
     except Exception as e:
         click.echo(f"Error during classify: {e}", err=True)
         raise click.Abort()
@@ -121,7 +151,7 @@ def run():
         click.echo(f"Error during playlist creation: {e}", err=True)
         raise click.Abort()
 
-    click.echo("\nDone! Run 'mapa status' to see a summary.")
+    click.echo("\nDone! Run 'sweepify status' to see a summary.")
 
 
 @main.command()

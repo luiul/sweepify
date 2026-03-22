@@ -1,7 +1,7 @@
 import sqlite3
 
-from mapa.config import DB_DIR, DB_PATH
-from mapa.models import Playlist, Song, generate_create_table, get_insert_columns
+from sweepify.config import DB_DIR, DB_PATH
+from sweepify.models import Playlist, Song, generate_create_table, get_insert_columns
 
 
 def _ensure_db_dir() -> None:

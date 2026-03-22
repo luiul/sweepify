@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from mapa.spotify import fetch_liked_songs
+from sweepify.spotify import fetch_liked_songs
 
 
 def _make_track(track_id: str, name: str, artist_name: str, artist_id: str) -> dict:

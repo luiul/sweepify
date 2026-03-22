@@ -1,7 +1,7 @@
 [project]
-name = "mapa"
+name = "sweepify"
 version = "0.1.0"
-description = "Classify your Spotify Liked Songs into playlists using AI"
+description = "AI-powered curator for your Spotify music — sweep your songs into playlists"
 readme = "README.md"
 authors = [
     { name = "luiul", email = "aceitunosoriano@gmail.com" }
@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.86.0",
+    "boto3>=1.42.73",
     "click>=8.3.1",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.2",
@@ -16,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mapa = "mapa.cli:main"
+sweepify = "sweepify.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.12,<0.11.0"]

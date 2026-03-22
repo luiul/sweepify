@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, call
 
-from mapa.spotify import create_playlist, add_to_existing_playlist
+from sweepify.spotify import create_playlist, add_to_existing_playlist
 
 
 def test_create_playlist():

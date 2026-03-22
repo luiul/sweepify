@@ -1,14 +1,14 @@
 import json
 from unittest.mock import MagicMock
 
-from mapa.classifier import (
+from sweepify.classifier import (
     ClassificationResult,
     _build_user_prompt,
     _merge_categories,
     Category,
     classify_songs,
 )
-from mapa.models import Song
+from sweepify.models import Song
 
 
 def _make_song(id: str, name: str = "Song", artist: str = "Artist") -> Song:

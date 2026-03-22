@@ -3,19 +3,19 @@ import os
 import pytest
 
 # Use in-memory-like temp DB for tests
-os.environ["MAPA_DB_DIR"] = "/tmp/mapa_test"
+os.environ["SWEEPIFY_DB_DIR"] = "/tmp/sweepify_test"
 
-from mapa import db
-from mapa.models import Playlist, Song
+from sweepify import db
+from sweepify.models import Playlist, Song
 
 
 @pytest.fixture(autouse=True)
 def fresh_db(tmp_path):
     """Use a fresh DB for each test."""
-    os.environ["MAPA_DB_DIR"] = str(tmp_path)
+    os.environ["SWEEPIFY_DB_DIR"] = str(tmp_path)
     # Re-read config since DB_DIR/DB_PATH are set at import time
     db.DB_DIR = tmp_path
-    db.DB_PATH = tmp_path / "mapa.db"
+    db.DB_PATH = tmp_path / "sweepify.db"
     db.init_db()
     yield
 
@@ -59,19 +59,19 @@ def test_mark_classified():
 
 
 def test_upsert_and_get_playlists():
-    db.upsert_playlist(Playlist(spotify_id="pl_1", name="mapa: Chill"))
-    db.upsert_playlist(Playlist(spotify_id="pl_2", name="mapa: Rock"))
+    db.upsert_playlist(Playlist(spotify_id="pl_1", name="sweepify: Chill"))
+    db.upsert_playlist(Playlist(spotify_id="pl_2", name="sweepify: Rock"))
 
     playlists = db.get_playlists()
     assert len(playlists) == 2
     names = {p.name for p in playlists}
-    assert "mapa: Chill" in names
+    assert "sweepify: Chill" in names
 
 
 def test_get_status():
     db.upsert_songs([_make_song("1"), _make_song("2"), _make_song("3")])
     db.mark_classified(["1"], "Rock", "pl_1")
-    db.upsert_playlist(Playlist(spotify_id="pl_1", name="mapa: Rock"))
+    db.upsert_playlist(Playlist(spotify_id="pl_1", name="sweepify: Rock"))
 
     s = db.get_status()
     assert s["total"] == 3
@@ -84,7 +84,7 @@ def test_get_status():
 def test_reset_classifications():
     db.upsert_songs([_make_song("1"), _make_song("2")])
     db.mark_classified(["1", "2"], "Pop", "pl_1")
-    db.upsert_playlist(Playlist(spotify_id="pl_1", name="mapa: Pop"))
+    db.upsert_playlist(Playlist(spotify_id="pl_1", name="sweepify: Pop"))
 
     count = db.reset_classifications()
     assert count == 2

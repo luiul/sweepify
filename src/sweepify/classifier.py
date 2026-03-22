@@ -1,12 +1,13 @@
 import json
+import typing
 
 import anthropic
 from pydantic import BaseModel
 
-from mapa.config import ANTHROPIC_API_KEY
-from mapa.models import Song
+from sweepify.config import ANTHROPIC_API_KEY, AWS_REGION, LLM_PROVIDER
+from sweepify.models import Song
 
-BATCH_SIZE = 200
+BATCH_SIZE = 100
 
 SYSTEM_PROMPT = """You are a music curator. Given a list of songs with metadata (name, artist, album, genres), \
 group them into playlists. Create between 5 and 15 categories based on genre, mood, energy, \
@@ -47,7 +48,27 @@ class ClassificationResult(BaseModel):
     categories: list[Category]
 
 
-def get_client() -> anthropic.Anthropic:
+BEDROCK_MODEL = "eu.anthropic.claude-sonnet-4-20250514-v1:0"
+DIRECT_MODEL = "claude-sonnet-4-20250514"
+
+
+def get_client() -> anthropic.Anthropic | anthropic.AnthropicBedrock:
+    if LLM_PROVIDER == "bedrock":
+        import boto3
+
+        session = boto3.Session()
+        creds = session.get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                "No AWS credentials found. Run 'aws sso login' and ensure AWS_PROFILE is set."
+            )
+        frozen = creds.get_frozen_credentials()
+        return anthropic.AnthropicBedrock(
+            aws_region=AWS_REGION,
+            aws_access_key=frozen.access_key,
+            aws_secret_key=frozen.secret_key,
+            aws_session_token=frozen.token,
+        )
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
@@ -71,14 +92,28 @@ def _build_user_prompt(songs: list[Song], existing_categories: list[Category] | 
     return f"Classify these songs into playlists:\n{song_list}"
 
 
-def classify_songs(client: anthropic.Anthropic, songs: list[Song]) -> ClassificationResult:
-    """Classify songs into categories using Claude. Handles batching for large collections."""
+def classify_songs(
+    client: anthropic.Anthropic,
+    songs: list[Song],
+    on_progress: typing.Callable[[int, int, int], None] | None = None,
+    on_batch_done: typing.Callable[[ClassificationResult], None] | None = None,
+) -> ClassificationResult:
+    """Classify songs into categories using Claude. Handles batching for large collections.
+
+    on_batch_done is called after each batch with that batch's results,
+    allowing the caller to persist progress incrementally.
+    """
     all_categories: list[Category] = []
     existing: list[Category] | None = None
+    total_batches = (len(songs) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    for i in range(0, len(songs), BATCH_SIZE):
+    for batch_num, i in enumerate(range(0, len(songs), BATCH_SIZE), 1):
         batch = songs[i : i + BATCH_SIZE]
+        if on_progress:
+            on_progress(batch_num, total_batches, len(batch))
         result = _classify_batch(client, batch, existing)
+        if on_batch_done:
+            on_batch_done(result)
         all_categories = _merge_categories(all_categories, result.categories)
         existing = all_categories
 
@@ -93,11 +128,17 @@ def _classify_batch(
     user_prompt = _build_user_prompt(songs, existing_categories)
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4096,
+        model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
+        max_tokens=8192,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
+
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            f"Claude response was truncated (batch of {len(songs)} songs). "
+            "Try reducing BATCH_SIZE."
+        )
 
     text = response.content[0].text
     # Strip markdown code fences if present
