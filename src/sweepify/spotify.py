@@ -183,6 +183,16 @@ def fetch_sweepify_playlists(sp: spotipy.Spotify) -> dict[str, str]:
     return playlists
 
 
+def delete_sweepify_playlists(sp: spotipy.Spotify) -> list[str]:
+    """Delete (unfollow) all sweepify-prefixed playlists. Returns deleted playlist names."""
+    playlists = fetch_sweepify_playlists(sp)
+    deleted = []
+    for category, playlist_id in playlists.items():
+        sp.current_user_unfollow_playlist(playlist_id)
+        deleted.append(f"{PLAYLIST_PREFIX} {category}")
+    return deleted
+
+
 def create_playlist(
     sp: spotipy.Spotify, category_name: str, song_ids: list[str]
 ) -> str:

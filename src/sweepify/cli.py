@@ -1,6 +1,7 @@
 import click
 
 from sweepify import db
+from sweepify.config import PLAYLIST_PREFIX
 
 
 @click.group()
@@ -192,6 +193,37 @@ def reset():
     """Clear all classification data (keeps songs)."""
     count = db.reset_classifications()
     click.echo(f"Reset {count} song(s). Playlists cleared.")
+
+
+@main.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def clear(yes: bool):
+    """Remove all sweepify playlists from Spotify and reset classifications."""
+    from sweepify import spotify
+
+    click.echo("Connecting to Spotify...")
+    sp = spotify.get_client()
+    playlists = spotify.fetch_sweepify_playlists(sp)
+
+    if not playlists:
+        click.echo("No sweepify playlists found on Spotify.")
+        count = db.reset_classifications()
+        if count:
+            click.echo(f"Reset {count} local classification(s).")
+        return
+
+    click.echo(f"This will delete {len(playlists)} playlist(s) from Spotify:")
+    for name in playlists:
+        click.echo(f"  - {PLAYLIST_PREFIX} {name}")
+
+    if not yes:
+        click.confirm("\nAre you sure?", abort=True)
+
+    deleted = spotify.delete_sweepify_playlists(sp)
+    click.echo(f"Deleted {len(deleted)} playlist(s) from Spotify.")
+
+    count = db.reset_classifications()
+    click.echo(f"Reset {count} local classification(s).")
 
 
 @main.command()
