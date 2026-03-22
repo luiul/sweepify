@@ -1,32 +1,7 @@
 import sqlite3
 
 from mapa.config import DB_DIR, DB_PATH
-from mapa.models import Playlist, Song
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS songs (
-    spotify_id   TEXT PRIMARY KEY,
-    name         TEXT NOT NULL,
-    artist       TEXT NOT NULL,
-    album        TEXT,
-    genres       TEXT,
-    added_at     TEXT,
-    energy       REAL,
-    valence      REAL,
-    tempo        REAL,
-    danceability REAL,
-    classified   INTEGER DEFAULT 0,
-    playlist_id  TEXT,
-    category     TEXT,
-    fetched_at   TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS playlists (
-    spotify_id   TEXT PRIMARY KEY,
-    name         TEXT NOT NULL,
-    created_at   TEXT DEFAULT CURRENT_TIMESTAMP
-);
-"""
+from mapa.models import Playlist, Song, generate_create_table, get_insert_columns
 
 
 def _ensure_db_dir() -> None:
@@ -42,34 +17,25 @@ def get_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     with get_connection() as conn:
-        conn.executescript(SCHEMA)
+        conn.execute(generate_create_table(Song, "songs"))
+        conn.execute(generate_create_table(Playlist, "playlists"))
+
+
+# --- Songs ---
+
+_SONG_INSERT_COLS = get_insert_columns(Song)
+_SONG_INSERT_SQL = (
+    f"INSERT OR IGNORE INTO songs ({', '.join(_SONG_INSERT_COLS)}) "
+    f"VALUES ({', '.join('?' for _ in _SONG_INSERT_COLS)})"
+)
 
 
 def upsert_songs(songs: list[Song]) -> int:
     """Insert songs, ignoring duplicates. Returns number of new songs added."""
     with get_connection() as conn:
         cursor = conn.executemany(
-            """
-            INSERT OR IGNORE INTO songs
-                (spotify_id, name, artist, album, genres, added_at,
-                 energy, valence, tempo, danceability)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    s.spotify_id,
-                    s.name,
-                    s.artist,
-                    s.album,
-                    s.genres,
-                    s.added_at,
-                    s.energy,
-                    s.valence,
-                    s.tempo,
-                    s.danceability,
-                )
-                for s in songs
-            ],
+            _SONG_INSERT_SQL,
+            [tuple(getattr(s, c) for c in _SONG_INSERT_COLS) for s in songs],
         )
         return cursor.rowcount
 
@@ -79,13 +45,13 @@ def get_unclassified_songs() -> list[Song]:
         rows = conn.execute(
             "SELECT * FROM songs WHERE classified = 0",
         ).fetchall()
-        return [_row_to_song(r) for r in rows]
+        return [Song.model_validate(dict(r)) for r in rows]
 
 
 def get_all_songs() -> list[Song]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM songs").fetchall()
-        return [_row_to_song(r) for r in rows]
+        return [Song.model_validate(dict(r)) for r in rows]
 
 
 def mark_classified(song_ids: list[str], category: str, playlist_id: str) -> None:
@@ -100,14 +66,20 @@ def mark_classified(song_ids: list[str], category: str, playlist_id: str) -> Non
         )
 
 
+# --- Playlists ---
+
+_PLAYLIST_INSERT_COLS = get_insert_columns(Playlist)
+_PLAYLIST_INSERT_SQL = (
+    f"INSERT OR REPLACE INTO playlists ({', '.join(_PLAYLIST_INSERT_COLS)}) "
+    f"VALUES ({', '.join('?' for _ in _PLAYLIST_INSERT_COLS)})"
+)
+
+
 def upsert_playlist(playlist: Playlist) -> None:
     with get_connection() as conn:
         conn.execute(
-            """
-            INSERT OR REPLACE INTO playlists (spotify_id, name)
-            VALUES (?, ?)
-            """,
-            (playlist.spotify_id, playlist.name),
+            _PLAYLIST_INSERT_SQL,
+            tuple(getattr(playlist, c) for c in _PLAYLIST_INSERT_COLS),
         )
 
 
@@ -115,6 +87,9 @@ def get_playlists() -> list[Playlist]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM playlists").fetchall()
         return [Playlist.model_validate(dict(r)) for r in rows]
+
+
+# --- Aggregates ---
 
 
 def get_status() -> dict[str, int]:
@@ -144,7 +119,3 @@ def reset_classifications() -> int:
         )
         conn.execute("DELETE FROM playlists")
         return cursor.rowcount
-
-
-def _row_to_song(row: sqlite3.Row) -> Song:
-    return Song.model_validate(dict(row))
