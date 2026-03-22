@@ -25,8 +25,7 @@ def init_db() -> None:
 
 _SONG_INSERT_COLS = get_insert_columns(Song)
 _SONG_INSERT_SQL = (
-    f"INSERT OR IGNORE INTO songs ({', '.join(_SONG_INSERT_COLS)}) "
-    f"VALUES ({', '.join('?' for _ in _SONG_INSERT_COLS)})"
+    f"INSERT OR IGNORE INTO songs ({', '.join(_SONG_INSERT_COLS)}) VALUES ({', '.join('?' for _ in _SONG_INSERT_COLS)})"
 )
 
 
@@ -87,6 +86,27 @@ def get_playlists() -> list[Playlist]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM playlists").fetchall()
         return [Playlist.model_validate(dict(r)) for r in rows]
+
+
+def get_songs_by_category() -> dict[str, list[Song]]:
+    """Get classified songs grouped by category, only those not yet added to a playlist."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM songs WHERE classified = 1 AND (playlist_id IS NULL OR playlist_id = '')",
+        ).fetchall()
+    by_cat: dict[str, list[Song]] = {}
+    for r in rows:
+        song = Song.model_validate(dict(r))
+        by_cat.setdefault(song.category, []).append(song)
+    return by_cat
+
+
+def get_playlist_by_name(name: str) -> Playlist | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM playlists WHERE name = ?", (name,)
+        ).fetchone()
+        return Playlist.model_validate(dict(row)) if row else None
 
 
 # --- Aggregates ---
