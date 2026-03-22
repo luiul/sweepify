@@ -1,4 +1,5 @@
 import json
+import typing
 
 import click
 import spotipy
@@ -20,12 +21,17 @@ def get_client() -> spotipy.Spotify:
     return spotipy.Spotify(auth_manager=auth_manager)
 
 
-def fetch_liked_songs(sp: spotipy.Spotify, playlist: str | None = None) -> list[Song]:
+def fetch_liked_songs(
+    sp: spotipy.Spotify,
+    playlist: str | None = None,
+    on_progress: typing.Callable[[int, int], None] | None = None,
+    on_genre_progress: typing.Callable[[int, int], None] | None = None,
+) -> list[Song]:
     """Fetch songs from Liked Songs or a specific playlist by name/ID."""
     if playlist:
         playlist_id = _resolve_playlist(sp, playlist)
-        return _fetch_playlist_tracks(sp, playlist_id)
-    return _fetch_saved_tracks(sp)
+        return _fetch_playlist_tracks(sp, playlist_id, on_progress=on_progress, on_genre_progress=on_genre_progress)
+    return _fetch_saved_tracks(sp, on_progress=on_progress, on_genre_progress=on_genre_progress)
 
 
 def _resolve_playlist(sp: spotipy.Spotify, playlist: str) -> str:
@@ -51,7 +57,11 @@ def _resolve_playlist(sp: spotipy.Spotify, playlist: str) -> str:
     raise click.ClickException(f"Playlist '{playlist}' not found.")
 
 
-def _fetch_saved_tracks(sp: spotipy.Spotify) -> list[Song]:
+def _fetch_saved_tracks(
+    sp: spotipy.Spotify,
+    on_progress: typing.Callable[[int, int], None] | None = None,
+    on_genre_progress: typing.Callable[[int, int], None] | None = None,
+) -> list[Song]:
     """Fetch all liked songs with pagination."""
     songs: list[Song] = []
     song_artist_ids: dict[str, list[str]] = {}
@@ -70,13 +80,20 @@ def _fetch_saved_tracks(sp: spotipy.Spotify) -> list[Song]:
             song_artist_ids[song.spotify_id] = artist_ids
 
         offset += len(items)
+        if on_progress:
+            on_progress(len(songs), results.get("total", len(songs)))
         if not results.get("next"):
             break
 
-    return _enrich_with_genres(sp, songs, song_artist_ids)
+    return _enrich_with_genres(sp, songs, song_artist_ids, on_progress=on_genre_progress)
 
 
-def _fetch_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[Song]:
+def _fetch_playlist_tracks(
+    sp: spotipy.Spotify,
+    playlist_id: str,
+    on_progress: typing.Callable[[int, int], None] | None = None,
+    on_genre_progress: typing.Callable[[int, int], None] | None = None,
+) -> list[Song]:
     """Fetch all tracks from a playlist."""
     songs: list[Song] = []
     song_artist_ids: dict[str, list[str]] = {}
@@ -97,10 +114,12 @@ def _fetch_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[Song]:
             song_artist_ids[song.spotify_id] = artist_ids
 
         offset += len(items)
+        if on_progress:
+            on_progress(len(songs), results.get("total", len(songs)))
         if not results.get("next"):
             break
 
-    return _enrich_with_genres(sp, songs, song_artist_ids)
+    return _enrich_with_genres(sp, songs, song_artist_ids, on_progress=on_genre_progress)
 
 
 def _parse_track(track: dict, added_at: str | None = None) -> tuple[Song, list[str]]:
@@ -125,6 +144,7 @@ def _enrich_with_genres(
     sp: spotipy.Spotify,
     songs: list[Song],
     song_artist_ids: dict[str, list[str]],
+    on_progress: typing.Callable[[int, int], None] | None = None,
 ) -> list[Song]:
     """Fetch artist genres in batches and attach them to songs."""
     # Collect all unique artist IDs
@@ -136,6 +156,7 @@ def _enrich_with_genres(
 
     # Fetch genres in batches of 50 (Spotify API limit)
     artist_genres: dict[str, list[str]] = {}
+    total_artists = len(all_artist_ids)
     for i in range(0, len(all_artist_ids), 50):
         batch = all_artist_ids[i : i + 50]
         try:
@@ -145,6 +166,8 @@ def _enrich_with_genres(
                     artist_genres[artist["id"]] = artist.get("genres", [])
         except Exception:
             pass
+        if on_progress:
+            on_progress(min(i + 50, total_artists), total_artists)
 
     # Attach genres to songs
     enriched = []
@@ -183,13 +206,19 @@ def fetch_sweepify_playlists(sp: spotipy.Spotify) -> dict[str, str]:
     return playlists
 
 
-def delete_sweepify_playlists(sp: spotipy.Spotify) -> list[str]:
+def delete_sweepify_playlists(
+    sp: spotipy.Spotify,
+    on_progress: typing.Callable[[int, int], None] | None = None,
+) -> list[str]:
     """Delete (unfollow) all sweepify-prefixed playlists. Returns deleted playlist names."""
     playlists = fetch_sweepify_playlists(sp)
     deleted = []
+    total = len(playlists)
     for category, playlist_id in playlists.items():
         sp.current_user_unfollow_playlist(playlist_id)
         deleted.append(f"{PLAYLIST_PREFIX} {category}")
+        if on_progress:
+            on_progress(len(deleted), total)
     return deleted
 
 

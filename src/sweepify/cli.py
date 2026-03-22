@@ -1,7 +1,23 @@
 import click
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
+from rich.table import Table
 
 from sweepify import db
 from sweepify.config import PLAYLIST_PREFIX
+
+console = Console()
+
+def _make_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
 
 
 @click.group()
@@ -14,16 +30,29 @@ def _fetch(playlist: str | None = None) -> list[str]:
     """Fetch songs. Returns list of fetched song IDs."""
     from sweepify import spotify
 
-    click.echo("Connecting to Spotify...")
+    console.print("Connecting to Spotify...")
     sp = spotify.get_client()
 
     source = f"playlist '{playlist}'" if playlist else "Liked Songs"
-    click.echo(f"Fetching songs from {source}...")
-    songs = spotify.fetch_liked_songs(sp, playlist=playlist)
-    click.echo(f"Fetched {len(songs)} song(s) from Spotify.")
+
+    with _make_progress() as progress:
+        fetch_task = progress.add_task(f"Fetching songs from {source}", total=None)
+        genre_task = progress.add_task("Enriching genres", total=None, visible=False)
+
+        def on_fetch(fetched: int, total: int) -> None:
+            progress.update(fetch_task, completed=fetched, total=total)
+
+        def on_genre(processed: int, total: int) -> None:
+            progress.update(genre_task, completed=processed, total=total, visible=True)
+
+        songs = spotify.fetch_liked_songs(sp, playlist=playlist, on_progress=on_fetch, on_genre_progress=on_genre)
+        progress.update(fetch_task, completed=progress.tasks[fetch_task].total or len(songs))
+        progress.update(genre_task, completed=progress.tasks[genre_task].total or 0, visible=progress.tasks[genre_task].visible)
+
+    console.print(f"Fetched {len(songs)} song(s) from Spotify.")
 
     count = db.upsert_songs(songs)
-    click.echo(f"Added {count} new song(s) to local database.")
+    console.print(f"Added {count} new song(s) to local database.")
     return [s.spotify_id for s in songs]
 
 
@@ -41,43 +70,46 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
         songs = [s for s in songs if s.spotify_id in allowed]
 
     if not songs:
-        click.echo("No unclassified songs found.")
+        console.print("No unclassified songs found.")
         return 0
 
     fixed_categories = None
     if max_playlists == 0:
-        click.echo("Fetching existing sweepify playlists from Spotify...")
+        console.print("Fetching existing sweepify playlists from Spotify...")
         sp = spotify.get_client()
         existing = spotify.fetch_sweepify_playlists(sp)
         if not existing:
-            click.echo("No existing sweepify playlists found. Use -n > 0 to create new ones.")
+            console.print("No existing sweepify playlists found. Use -n > 0 to create new ones.")
             return 0
         fixed_categories = list(existing.keys())
-        click.echo(f"Classifying into {len(fixed_categories)} existing playlist(s).")
+        console.print(f"Classifying into {len(fixed_categories)} existing playlist(s).")
 
-    click.echo(f"Classifying {len(songs)} song(s) with Claude...")
+    console.print(f"Classifying {len(songs)} song(s) with Claude...")
     client = classifier.get_client()
     classified_count = 0
 
-    def on_progress(batch: int, total: int, size: int) -> None:
-        click.echo(f"  Batch {batch}/{total} ({size} songs)...")
+    with _make_progress() as progress:
+        task = progress.add_task("Classifying songs", total=len(songs))
 
-    def on_batch_done(result: classifier.ClassificationResult) -> None:
-        nonlocal classified_count
-        for cat in result.categories:
-            db.mark_classified(cat.song_ids, cat.name, playlist_id="")
-            classified_count += len(cat.song_ids)
+        def on_progress(batch: int, total: int, size: int) -> None:
+            progress.advance(task, size)
 
-    result = classifier.classify_songs(
-        client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
-        max_playlists=max_playlists, fixed_categories=fixed_categories,
-    )
+        def on_batch_done(result: classifier.ClassificationResult) -> None:
+            nonlocal classified_count
+            for cat in result.categories:
+                db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+                classified_count += len(cat.song_ids)
 
-    click.echo("Categories:")
+        result = classifier.classify_songs(
+            client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
+            max_playlists=max_playlists, fixed_categories=fixed_categories,
+        )
+
+    console.print("Categories:")
     for cat in result.categories:
-        click.echo(f"  {cat.name}: {len(cat.song_ids)} song(s)")
+        console.print(f"  {cat.name}: {len(cat.song_ids)} song(s)")
 
-    click.echo(f"Classified {classified_count} song(s) into {len(result.categories)} categories.")
+    console.print(f"Classified {classified_count} song(s) into {len(result.categories)} categories.")
     return classified_count
 
 
@@ -88,35 +120,39 @@ def _create() -> int:
 
     songs_by_cat = db.get_songs_by_category()
     if not songs_by_cat:
-        click.echo("No classified songs pending playlist creation.")
+        console.print("No classified songs pending playlist creation.")
         return 0
 
-    click.echo("Connecting to Spotify...")
+    console.print("Connecting to Spotify...")
     sp = spotify.get_client()
 
     # Sync existing sweepify playlists from Spotify into local DB
     remote_playlists = spotify.fetch_sweepify_playlists(sp)
     if remote_playlists:
-        click.echo(f"Found {len(remote_playlists)} existing sweepify playlist(s) on Spotify.")
+        console.print(f"Found {len(remote_playlists)} existing sweepify playlist(s) on Spotify.")
         for category, pid in remote_playlists.items():
             db.upsert_playlist(Playlist(spotify_id=pid, name=category))
 
-    for category, songs in songs_by_cat.items():
-        song_ids = [s.spotify_id for s in songs]
-        existing = db.get_playlist_by_name(category)
+    with _make_progress() as progress:
+        task = progress.add_task("Creating playlists", total=len(songs_by_cat))
 
-        if existing:
-            click.echo(f"  Adding {len(song_ids)} song(s) to existing playlist: {category}")
-            spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
-            playlist_id = existing.spotify_id
-        else:
-            click.echo(f"  Creating playlist: {category} ({len(song_ids)} songs)")
-            playlist_id = spotify.create_playlist(sp, category, song_ids)
-            db.upsert_playlist(Playlist(spotify_id=playlist_id, name=category))
+        for category, songs in songs_by_cat.items():
+            song_ids = [s.spotify_id for s in songs]
+            existing = db.get_playlist_by_name(category)
 
-        db.mark_classified(song_ids, category, playlist_id)
+            if existing:
+                progress.console.print(f"  Adding {len(song_ids)} song(s) to existing playlist: {category}")
+                spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
+                playlist_id = existing.spotify_id
+            else:
+                progress.console.print(f"  Creating playlist: {category} ({len(song_ids)} songs)")
+                playlist_id = spotify.create_playlist(sp, category, song_ids)
+                db.upsert_playlist(Playlist(spotify_id=playlist_id, name=category))
 
-    click.echo(f"Processed {len(songs_by_cat)} playlist(s).")
+            db.mark_classified(song_ids, category, playlist_id)
+            progress.advance(task)
+
+    console.print(f"Processed {len(songs_by_cat)} playlist(s).")
     return len(songs_by_cat)
 
 
@@ -135,7 +171,7 @@ def classify(playlist: str | None, max_playlists: int):
     song_ids = None
     if playlist:
         from sweepify import spotify
-        click.echo("Resolving playlist...")
+        console.print("Resolving playlist...")
         sp = spotify.get_client()
         songs = spotify.fetch_liked_songs(sp, playlist=playlist)
         song_ids = [s.spotify_id for s in songs]
@@ -153,46 +189,50 @@ def create():
 @click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of playlists to create. Use 0 to only classify into existing playlists.")
 def run(playlist: str | None, max_playlists: int):
     """Run full pipeline: fetch → classify → create."""
-    click.echo("=== Step 1/3: Fetch ===")
+    console.rule("[bold]Step 1/3: Fetch")
     try:
         fetched_ids = _fetch(playlist=playlist)
     except Exception as e:
-        click.echo(f"Error during fetch: {e}", err=True)
+        console.print(f"[red]Error during fetch: {e}[/red]")
         raise click.Abort()
 
-    click.echo("\n=== Step 2/3: Classify ===")
+    console.rule("[bold]Step 2/3: Classify")
     try:
         _classify(song_ids=fetched_ids if playlist else None, max_playlists=max_playlists)
     except Exception as e:
-        click.echo(f"Error during classify: {e}", err=True)
+        console.print(f"[red]Error during classify: {e}[/red]")
         raise click.Abort()
 
-    click.echo("\n=== Step 3/3: Create Playlists ===")
+    console.rule("[bold]Step 3/3: Create Playlists")
     try:
         _create()
     except Exception as e:
-        click.echo(f"Error during playlist creation: {e}", err=True)
+        console.print(f"[red]Error during playlist creation: {e}[/red]")
         raise click.Abort()
 
-    click.echo("\nDone! Run 'sweepify status' to see a summary.")
+    console.print("\n[green]Done![/green] Run 'sweepify status' to see a summary.")
 
 
 @main.command()
 def status():
     """Show song and classification counts."""
     s = db.get_status()
-    click.echo(f"Total songs:   {s['total']}")
-    click.echo(f"Classified:    {s['classified']}")
-    click.echo(f"Unclassified:  {s['unclassified']}")
-    click.echo(f"Categories:    {s['categories']}")
-    click.echo(f"Playlists:     {s['playlists']}")
+    table = Table(title="Sweepify Status", show_header=False)
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Total songs", str(s['total']))
+    table.add_row("Classified", str(s['classified']))
+    table.add_row("Unclassified", str(s['unclassified']))
+    table.add_row("Categories", str(s['categories']))
+    table.add_row("Playlists", str(s['playlists']))
+    console.print(table)
 
 
 @main.command()
 def reset():
     """Clear all classification data (keeps songs)."""
     count = db.reset_classifications()
-    click.echo(f"Reset {count} song(s). Playlists cleared.")
+    console.print(f"Reset {count} song(s). Playlists cleared.")
 
 
 @main.command()
@@ -201,29 +241,36 @@ def clear(yes: bool):
     """Remove all sweepify playlists from Spotify and reset classifications."""
     from sweepify import spotify
 
-    click.echo("Connecting to Spotify...")
+    console.print("Connecting to Spotify...")
     sp = spotify.get_client()
     playlists = spotify.fetch_sweepify_playlists(sp)
 
     if not playlists:
-        click.echo("No sweepify playlists found on Spotify.")
+        console.print("No sweepify playlists found on Spotify.")
         count = db.reset_classifications()
         if count:
-            click.echo(f"Reset {count} local classification(s).")
+            console.print(f"Reset {count} local classification(s).")
         return
 
-    click.echo(f"This will delete {len(playlists)} playlist(s) from Spotify:")
+    console.print(f"This will delete {len(playlists)} playlist(s) from Spotify:")
     for name in playlists:
-        click.echo(f"  - {PLAYLIST_PREFIX} {name}")
+        console.print(f"  - {PLAYLIST_PREFIX} {name}")
 
     if not yes:
         click.confirm("\nAre you sure?", abort=True)
 
-    deleted = spotify.delete_sweepify_playlists(sp)
-    click.echo(f"Deleted {len(deleted)} playlist(s) from Spotify.")
+    with _make_progress() as progress:
+        task = progress.add_task("Deleting playlists", total=len(playlists))
+
+        def on_delete_progress(deleted: int, total: int) -> None:
+            progress.update(task, completed=deleted)
+
+        deleted = spotify.delete_sweepify_playlists(sp, on_progress=on_delete_progress)
+
+    console.print(f"Deleted {len(deleted)} playlist(s) from Spotify.")
 
     count = db.reset_classifications()
-    click.echo(f"Reset {count} local classification(s).")
+    console.print(f"Reset {count} local classification(s).")
 
 
 @main.command()
@@ -237,24 +284,24 @@ def playlist(genres: str, name: str | None, max_playlists: int):
 
     genre_list = [g.strip() for g in genres.split(",") if g.strip()]
     if not genre_list:
-        click.echo("No genres provided.", err=True)
+        console.print("[red]No genres provided.[/red]")
         raise click.Abort()
 
-    click.echo(f"Searching for songs matching: {', '.join(genre_list)}")
+    console.print(f"Searching for songs matching: {', '.join(genre_list)}")
     songs = db.get_songs_by_genres(genre_list)
 
     if not songs:
-        click.echo("No songs found matching those genres.")
+        console.print("No songs found matching those genres.")
         return
 
-    click.echo(f"Found {len(songs)} song(s). Sending to Claude...")
+    console.print(f"Found {len(songs)} song(s). Sending to Claude...")
     client = classifier.get_client()
     result = classifier.classify_by_genre(
         client, songs, genre_list,
         max_playlists=max_playlists, playlist_name=name,
     )
 
-    click.echo("Connecting to Spotify...")
+    console.print("Connecting to Spotify...")
     sp = spotify.get_client()
 
     # Sync existing playlists
@@ -262,23 +309,27 @@ def playlist(genres: str, name: str | None, max_playlists: int):
     for cat, pid in remote_playlists.items():
         db.upsert_playlist(Playlist(spotify_id=pid, name=cat))
 
-    for cat in result.categories:
-        song_ids = cat.song_ids
-        existing = db.get_playlist_by_name(cat.name)
+    with _make_progress() as progress:
+        task = progress.add_task("Creating playlists", total=len(result.categories))
 
-        if existing:
-            click.echo(f"  Adding {len(song_ids)} song(s) to existing playlist: {cat.name}")
-            spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
-            playlist_id = existing.spotify_id
-        else:
-            click.echo(f"  Creating playlist: {cat.name} ({len(song_ids)} songs)")
-            playlist_id = spotify.create_playlist(sp, cat.name, song_ids)
-            db.upsert_playlist(Playlist(spotify_id=playlist_id, name=cat.name))
+        for cat in result.categories:
+            song_ids = cat.song_ids
+            existing = db.get_playlist_by_name(cat.name)
 
-        db.mark_classified(song_ids, cat.name, playlist_id)
+            if existing:
+                progress.console.print(f"  Adding {len(song_ids)} song(s) to existing playlist: {cat.name}")
+                spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
+                playlist_id = existing.spotify_id
+            else:
+                progress.console.print(f"  Creating playlist: {cat.name} ({len(song_ids)} songs)")
+                playlist_id = spotify.create_playlist(sp, cat.name, song_ids)
+                db.upsert_playlist(Playlist(spotify_id=playlist_id, name=cat.name))
+
+            db.mark_classified(song_ids, cat.name, playlist_id)
+            progress.advance(task)
 
     total = sum(len(c.song_ids) for c in result.categories)
-    click.echo(f"Done! Added {total} song(s) to {len(result.categories)} playlist(s).")
+    console.print(f"[green]Done![/green] Added {total} song(s) to {len(result.categories)} playlist(s).")
 
 
 @main.command()
