@@ -26,12 +26,13 @@ def _fetch(playlist: str | None = None) -> list[str]:
     return [s.spotify_id for s in songs]
 
 
-def _classify(song_ids: list[str] | None = None) -> int:
+def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int:
     """Classify unclassified songs. Returns number of songs classified.
 
     If song_ids is provided, only classify those songs (that are also unclassified).
+    If max_playlists is 0, classify only into existing sweepify playlists.
     """
-    from sweepify import classifier
+    from sweepify import classifier, spotify
 
     songs = db.get_unclassified_songs()
     if song_ids is not None:
@@ -41,6 +42,17 @@ def _classify(song_ids: list[str] | None = None) -> int:
     if not songs:
         click.echo("No unclassified songs found.")
         return 0
+
+    fixed_categories = None
+    if max_playlists == 0:
+        click.echo("Fetching existing sweepify playlists from Spotify...")
+        sp = spotify.get_client()
+        existing = spotify.fetch_sweepify_playlists(sp)
+        if not existing:
+            click.echo("No existing sweepify playlists found. Use -n > 0 to create new ones.")
+            return 0
+        fixed_categories = list(existing.keys())
+        click.echo(f"Classifying into {len(fixed_categories)} existing playlist(s).")
 
     click.echo(f"Classifying {len(songs)} song(s) with Claude...")
     client = classifier.get_client()
@@ -57,6 +69,7 @@ def _classify(song_ids: list[str] | None = None) -> int:
 
     result = classifier.classify_songs(
         client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
+        max_playlists=max_playlists, fixed_categories=fixed_categories,
     )
 
     click.echo("Categories:")
@@ -115,7 +128,8 @@ def fetch(playlist: str | None):
 
 @main.command()
 @click.option("--playlist", "-p", default=None, help="Only classify songs from this playlist (name or ID).")
-def classify(playlist: str | None):
+@click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of playlists to create. Use 0 to only classify into existing playlists.")
+def classify(playlist: str | None, max_playlists: int):
     """Classify unclassified songs using Claude."""
     song_ids = None
     if playlist:
@@ -124,7 +138,7 @@ def classify(playlist: str | None):
         sp = spotify.get_client()
         songs = spotify.fetch_liked_songs(sp, playlist=playlist)
         song_ids = [s.spotify_id for s in songs]
-    _classify(song_ids=song_ids)
+    _classify(song_ids=song_ids, max_playlists=max_playlists)
 
 
 @main.command()
@@ -135,7 +149,8 @@ def create():
 
 @main.command()
 @click.option("--playlist", "-p", default=None, help="Fetch from a specific playlist instead of Liked Songs.")
-def run(playlist: str | None):
+@click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of playlists to create. Use 0 to only classify into existing playlists.")
+def run(playlist: str | None, max_playlists: int):
     """Run full pipeline: fetch → classify → create."""
     click.echo("=== Step 1/3: Fetch ===")
     try:
@@ -146,7 +161,7 @@ def run(playlist: str | None):
 
     click.echo("\n=== Step 2/3: Classify ===")
     try:
-        _classify(song_ids=fetched_ids if playlist else None)
+        _classify(song_ids=fetched_ids if playlist else None, max_playlists=max_playlists)
     except Exception as e:
         click.echo(f"Error during classify: {e}", err=True)
         raise click.Abort()

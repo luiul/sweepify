@@ -9,8 +9,8 @@ from sweepify.models import Song
 
 BATCH_SIZE = 100
 
-SYSTEM_PROMPT = """You are a music curator. Given a list of songs with metadata (name, artist, album, genres), \
-group them into playlists. Create between 5 and 15 categories based on genre, mood, energy, \
+_SYSTEM_PROMPT_TEMPLATE = """You are a music curator. Given a list of songs with metadata (name, artist, album, genres), \
+group them into playlists. Create between 5 and {max_playlists} categories based on genre, mood, energy, \
 and thematic coherence. Each song must belong to exactly one category.
 
 Return your response as a JSON object with this exact structure:
@@ -30,11 +30,37 @@ Important:
 - Do not use generic names like "Category 1" or "Miscellaneous"
 - Return ONLY the JSON object, no other text"""
 
+DEFAULT_MAX_PLAYLISTS = 10
+
 FOLLOWUP_PROMPT_PREFIX = """Here are the existing categories from previous batches. \
 Assign each song to one of these categories. Only create a new category if a song truly \
 does not fit any existing one.
 
 Existing categories:
+"""
+
+_FIXED_CATEGORIES_SYSTEM_PROMPT = """You are a music curator. Given a list of songs with metadata \
+(name, artist, album, genres), assign each song to one of the provided categories. \
+Do NOT create any new categories — every song must go into one of the existing ones.
+
+Return your response as a JSON object with this exact structure:
+{
+  "categories": [
+    {
+      "name": "Category Name",
+      "description": "Brief description of what ties these songs together",
+      "song_ids": ["spotify_id_1", "spotify_id_2"]
+    }
+  ]
+}
+
+Important:
+- Every song_id from the input must appear in exactly one category
+- Use ONLY the provided category names — do not invent new ones
+- Return ONLY the JSON object, no other text"""
+
+_FIXED_CATEGORIES_PROMPT_PREFIX = """Use ONLY these categories:
+
 """
 
 
@@ -92,26 +118,43 @@ def _build_user_prompt(songs: list[Song], existing_categories: list[Category] | 
     return f"Classify these songs into playlists:\n{song_list}"
 
 
+def _build_fixed_categories_prompt(songs: list[Song], categories: list[Category]) -> str:
+    song_list = _format_songs_for_prompt(songs)
+    cat_list = "\n".join(f"- {c.name}" for c in categories)
+    return f"{_FIXED_CATEGORIES_PROMPT_PREFIX}{cat_list}\n\nSongs to classify:\n{song_list}"
+
+
 def classify_songs(
     client: anthropic.Anthropic,
     songs: list[Song],
     on_progress: typing.Callable[[int, int, int], None] | None = None,
     on_batch_done: typing.Callable[[ClassificationResult], None] | None = None,
+    max_playlists: int = DEFAULT_MAX_PLAYLISTS,
+    fixed_categories: list[str] | None = None,
 ) -> ClassificationResult:
     """Classify songs into categories using Claude. Handles batching for large collections.
 
     on_batch_done is called after each batch with that batch's results,
     allowing the caller to persist progress incrementally.
+
+    If fixed_categories is provided, songs are assigned only to those categories
+    (no new categories are created).
     """
     all_categories: list[Category] = []
     existing: list[Category] | None = None
+    if fixed_categories is not None:
+        existing = [Category(name=c, description="", song_ids=[]) for c in fixed_categories]
     total_batches = (len(songs) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for batch_num, i in enumerate(range(0, len(songs), BATCH_SIZE), 1):
         batch = songs[i : i + BATCH_SIZE]
         if on_progress:
             on_progress(batch_num, total_batches, len(batch))
-        result = _classify_batch(client, batch, existing)
+        result = _classify_batch(
+            client, batch, existing,
+            max_playlists=max_playlists,
+            fixed_only=fixed_categories is not None,
+        )
         if on_batch_done:
             on_batch_done(result)
         all_categories = _merge_categories(all_categories, result.categories)
@@ -124,13 +167,20 @@ def _classify_batch(
     client: anthropic.Anthropic,
     songs: list[Song],
     existing_categories: list[Category] | None,
+    max_playlists: int = DEFAULT_MAX_PLAYLISTS,
+    fixed_only: bool = False,
 ) -> ClassificationResult:
-    user_prompt = _build_user_prompt(songs, existing_categories)
+    if fixed_only and existing_categories:
+        user_prompt = _build_fixed_categories_prompt(songs, existing_categories)
+        system_prompt = _FIXED_CATEGORIES_SYSTEM_PROMPT
+    else:
+        user_prompt = _build_user_prompt(songs, existing_categories)
+        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(max_playlists=max_playlists)
 
     response = client.messages.create(
         model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
         max_tokens=8192,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
 
