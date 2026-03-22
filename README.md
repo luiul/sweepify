@@ -68,15 +68,34 @@ uv run sweepify classify   # Classify songs using Claude
 uv run sweepify create     # Create Spotify playlists
 uv run sweepify status     # Show song and classification counts
 uv run sweepify reset      # Clear classifications (keeps songs)
+uv run sweepify clear      # Remove sweepify playlists from Spotify + reset
+```
+
+### Genre-based playlists
+
+Create playlists from songs matching specific genres:
+
+```bash
+uv run sweepify playlist -g "lo-fi house, minimal techno"             # Claude picks the name
+uv run sweepify playlist -g "corrido, banda" --name "Corridos Mix"    # custom name
+uv run sweepify playlist -g "latin, reggaeton" -n 3                   # split into 3 playlists
+```
+
+Use `-n 0` with `run` or `classify` to classify songs only into existing sweepify playlists:
+
+```bash
+uv run sweepify run -n 0
 ```
 
 ### Database explorer
 
-Browse your songs, explore genre breakdowns, and run ad-hoc SQL queries in an interactive Streamlit UI:
+Browse your songs, explore genre breakdowns, build playlist commands, and run ad-hoc SQL queries in an interactive Streamlit UI:
 
 ```bash
 uv run --group ui sweepify ui
 ```
+
+The Playlist Builder tab lets you select genres, preview matching songs, and generates the CLI command to run.
 
 ### First run
 

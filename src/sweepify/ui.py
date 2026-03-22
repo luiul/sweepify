@@ -4,8 +4,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from sweepify.config import DB_PATH
-from sweepify.db import get_connection, get_status, init_db
+from sweepify.config import DB_PATH, PLAYLIST_PREFIX
+from sweepify.db import get_connection, get_songs_by_genres, get_status, init_db
 
 COLORS = ["#1DB954", "#1ED760", "#2EBD59", "#57B660", "#A0E8AF",
           "#B497D6", "#E8A0BF", "#F2C57C", "#7EC8E3", "#FF6B6B"]
@@ -33,7 +33,7 @@ cols[1].metric("Unclassified", status["unclassified"])
 st.sidebar.metric("Categories", status["categories"])
 st.sidebar.metric("Playlists", status["playlists"])
 
-view = st.sidebar.radio("View", ["Songs", "Genres", "Playlists", "SQL"])
+view = st.sidebar.radio("View", ["Songs", "Genres", "Playlists", "Playlist Builder", "SQL"])
 
 # --- Main area ---
 
@@ -173,6 +173,84 @@ elif view == "Playlists":
         st.info("No playlists yet. Run `sweepify create` to generate them.")
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+elif view == "Playlist Builder":
+    st.header("Playlist Builder")
+    df = load_table("songs")
+
+    if df.empty:
+        st.info("No songs yet. Run `sweepify fetch` to get started.")
+    else:
+        # Parse all available genres
+        all_genres: set[str] = set()
+        for g in df["genres"].dropna():
+            try:
+                all_genres.update(json.loads(g))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        sorted_genres = sorted(all_genres)
+
+        # Existing sweepify playlists
+        playlists_df = load_table("playlists")
+        if not playlists_df.empty:
+            st.subheader("Existing Sweepify Playlists")
+            # Count songs per playlist
+            songs_per_playlist = (
+                df[df["category"].notna()]
+                .groupby("category")
+                .size()
+                .reset_index(name="songs")
+            )
+            playlist_info = playlists_df.merge(
+                songs_per_playlist, left_on="name", right_on="category", how="left",
+            )[["name", "spotify_id", "songs"]].fillna(0)
+            playlist_info["songs"] = playlist_info["songs"].astype(int)
+            st.dataframe(playlist_info, use_container_width=True, hide_index=True)
+
+        st.subheader("Build Command")
+
+        selected_genres = st.multiselect(
+            "Select genres",
+            sorted_genres,
+            help="Songs matching any of these genres will be included.",
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            playlist_name = st.text_input(
+                "Playlist name (optional)",
+                help="Leave empty to let Claude pick a name.",
+            )
+        with col2:
+            max_playlists = st.number_input(
+                "Max playlists", min_value=1, max_value=20, value=1,
+            )
+
+        # Preview matching songs
+        if selected_genres:
+            matching = get_songs_by_genres(selected_genres)
+            st.caption(f"{len(matching)} song(s) match the selected genres")
+
+            if matching:
+                match_df = pd.DataFrame([
+                    {"name": s.name, "artist": s.artist, "genres": s.genres}
+                    for s in matching
+                ])
+                with st.expander(f"Preview ({len(matching)} songs)"):
+                    st.dataframe(match_df, use_container_width=True, hide_index=True)
+
+            # Build the command
+            genre_arg = ", ".join(selected_genres)
+            cmd = f'uv run sweepify playlist -g "{genre_arg}"'
+            if playlist_name:
+                cmd += f' --name "{playlist_name}"'
+            if max_playlists > 1:
+                cmd += f" -n {max_playlists}"
+
+            st.subheader("Command")
+            st.code(cmd, language="bash")
+        else:
+            st.caption("Select at least one genre to preview matching songs.")
 
 elif view == "SQL":
     st.header("SQL Playground")
