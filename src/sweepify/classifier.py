@@ -14,15 +14,15 @@ group them into playlists. Create between 5 and {max_playlists} categories based
 and thematic coherence. Each song must belong to exactly one category.
 
 Return your response as a JSON object with this exact structure:
-{
+{{
   "categories": [
-    {
+    {{
       "name": "Category Name",
       "description": "Brief description of what ties these songs together",
       "song_ids": ["spotify_id_1", "spotify_id_2"]
-    }
+    }}
   ]
-}
+}}
 
 Important:
 - Every song_id from the input must appear in exactly one category
@@ -191,10 +191,19 @@ def _classify_batch(
         )
 
     text = response.content[0].text
-    # Strip markdown code fences if present
-    if text.strip().startswith("```"):
-        lines = text.strip().split("\n")
-        text = "\n".join(lines[1:-1])
+    # Extract JSON from response, stripping markdown code fences if present
+    text = text.strip()
+    if text.startswith("```"):
+        # Remove opening fence (```json, ```, etc.) and closing fence
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
+    # Fallback: find the first { ... } JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start : end + 1]
 
     parsed = json.loads(text)
     return ClassificationResult.model_validate(parsed)
