@@ -70,6 +70,14 @@ uv run sweepify status     # Show song and classification counts
 uv run sweepify reset      # Clear classifications (keeps songs)
 ```
 
+### Database explorer
+
+Browse your songs, explore genre breakdowns, and run ad-hoc SQL queries in an interactive Streamlit UI:
+
+```bash
+uv run --group ui sweepify ui
+```
+
 ### First run
 
 On your first run, a browser window will open for Spotify authorization. Grant the requested permissions and you'll be redirected back. The auth token is cached locally for subsequent runs.
@@ -98,4 +106,5 @@ On your first run, a browser window will open for Spotify authorization. Grant t
 uv run pytest           # Run tests
 uv run ruff check .     # Lint
 uv run ruff format .    # Format
+uv sync --group ui      # Install UI dependencies (Streamlit, Plotly)
 ```
