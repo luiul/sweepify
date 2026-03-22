@@ -1,10 +1,12 @@
 import click
 
+from mapa import db
+
 
 @click.group()
 def main():
     """mapa — Classify your Spotify Liked Songs into playlists using AI."""
-    pass
+    db.init_db()
 
 
 @main.command()
@@ -34,10 +36,16 @@ def run():
 @main.command()
 def status():
     """Show song and classification counts."""
-    click.echo("Not implemented yet.")
+    s = db.get_status()
+    click.echo(f"Total songs:   {s['total']}")
+    click.echo(f"Classified:    {s['classified']}")
+    click.echo(f"Unclassified:  {s['unclassified']}")
+    click.echo(f"Categories:    {s['categories']}")
+    click.echo(f"Playlists:     {s['playlists']}")
 
 
 @main.command()
 def reset():
     """Clear all classification data (keeps songs)."""
-    click.echo("Not implemented yet.")
+    count = db.reset_classifications()
+    click.echo(f"Reset {count} song(s). Playlists cleared.")
