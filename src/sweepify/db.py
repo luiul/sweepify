@@ -109,6 +109,21 @@ def get_playlist_by_name(name: str) -> Playlist | None:
         return Playlist.model_validate(dict(row)) if row else None
 
 
+# --- Genre queries ---
+
+
+def get_songs_by_genres(genres: list[str]) -> list[Song]:
+    """Get songs whose genres JSON array contains any of the given genres."""
+    with get_connection() as conn:
+        placeholders = " OR ".join("genres LIKE ?" for _ in genres)
+        params = [f'%"{g}"%' for g in genres]
+        rows = conn.execute(
+            f"SELECT * FROM songs WHERE {placeholders}",  # noqa: S608
+            params,
+        ).fetchall()
+        return [Song.model_validate(dict(r)) for r in rows]
+
+
 # --- Aggregates ---
 
 

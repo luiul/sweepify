@@ -28,6 +28,8 @@ Important:
 - Every song_id from the input must appear in exactly one category
 - Category names should be descriptive and evocative (e.g. "Late Night Drive", "Sunday Morning Coffee")
 - Do not use generic names like "Category 1" or "Miscellaneous"
+- Aim for balanced playlists — each category should have at least 5 songs
+- Prefer fewer, well-populated playlists over many small ones. Merge niche categories into broader ones rather than creating categories with only 1-3 songs
 - Return ONLY the JSON object, no other text"""
 
 DEFAULT_MAX_PLAYLISTS = 10
@@ -57,6 +59,7 @@ Return your response as a JSON object with this exact structure:
 Important:
 - Every song_id from the input must appear in exactly one category
 - Use ONLY the provided category names — do not invent new ones
+- Aim for balanced distribution — avoid leaving most songs in a single category
 - Return ONLY the JSON object, no other text"""
 
 _FIXED_CATEGORIES_PROMPT_PREFIX = """Use ONLY these categories:
@@ -200,6 +203,75 @@ def _classify_batch(
             text = text.rstrip()[:-3]
 
     # Fallback: find the first { ... } JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start : end + 1]
+
+    parsed = json.loads(text)
+    return ClassificationResult.model_validate(parsed)
+
+
+_GENRE_SYSTEM_PROMPT = """You are a music curator. Given a list of songs that match certain genres, \
+organize them into playlists. Each song must belong to exactly one playlist.
+
+Return your response as a JSON object with this exact structure:
+{
+  "categories": [
+    {
+      "name": "Playlist Name",
+      "description": "Brief description of what ties these songs together",
+      "song_ids": ["spotify_id_1", "spotify_id_2"]
+    }
+  ]
+}
+
+Important:
+- Every song_id from the input must appear in exactly one category
+- Playlist names should be descriptive and evocative
+- Aim for balanced playlists — each should have at least 5 songs
+- Return ONLY the JSON object, no other text"""
+
+
+def classify_by_genre(
+    client: anthropic.Anthropic,
+    songs: list[Song],
+    genres: list[str],
+    max_playlists: int = 1,
+    playlist_name: str | None = None,
+) -> ClassificationResult:
+    """Classify songs matching specific genres into playlists."""
+    song_list = _format_songs_for_prompt(songs)
+    genre_str = ", ".join(genres)
+
+    if playlist_name and max_playlists == 1:
+        user_prompt = (
+            f"These songs match the genres: {genre_str}.\n"
+            f"Put all of them into a single playlist named \"{playlist_name}\".\n\n"
+            f"Songs:\n{song_list}"
+        )
+    else:
+        user_prompt = (
+            f"These songs match the genres: {genre_str}.\n"
+            f"Organize them into up to {max_playlists} playlist(s) based on sub-genre, "
+            f"mood, or thematic coherence.\n\n"
+            f"Songs:\n{song_list}"
+        )
+
+    response = client.messages.create(
+        model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
+        max_tokens=8192,
+        system=_GENRE_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    text = response.content[0].text
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1:

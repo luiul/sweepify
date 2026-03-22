@@ -227,6 +227,61 @@ def clear(yes: bool):
 
 
 @main.command()
+@click.option("--genres", "-g", required=True, help="Comma-separated list of genres to match.")
+@click.option("--name", default=None, help="Playlist name. If omitted, Claude picks one.")
+@click.option("--max-playlists", "-n", default=1, show_default=True, help="Number of playlists to split into.")
+def playlist(genres: str, name: str | None, max_playlists: int):
+    """Create a playlist from songs matching specific genres."""
+    from sweepify import classifier, spotify
+    from sweepify.models import Playlist
+
+    genre_list = [g.strip() for g in genres.split(",") if g.strip()]
+    if not genre_list:
+        click.echo("No genres provided.", err=True)
+        raise click.Abort()
+
+    click.echo(f"Searching for songs matching: {', '.join(genre_list)}")
+    songs = db.get_songs_by_genres(genre_list)
+
+    if not songs:
+        click.echo("No songs found matching those genres.")
+        return
+
+    click.echo(f"Found {len(songs)} song(s). Sending to Claude...")
+    client = classifier.get_client()
+    result = classifier.classify_by_genre(
+        client, songs, genre_list,
+        max_playlists=max_playlists, playlist_name=name,
+    )
+
+    click.echo("Connecting to Spotify...")
+    sp = spotify.get_client()
+
+    # Sync existing playlists
+    remote_playlists = spotify.fetch_sweepify_playlists(sp)
+    for cat, pid in remote_playlists.items():
+        db.upsert_playlist(Playlist(spotify_id=pid, name=cat))
+
+    for cat in result.categories:
+        song_ids = cat.song_ids
+        existing = db.get_playlist_by_name(cat.name)
+
+        if existing:
+            click.echo(f"  Adding {len(song_ids)} song(s) to existing playlist: {cat.name}")
+            spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
+            playlist_id = existing.spotify_id
+        else:
+            click.echo(f"  Creating playlist: {cat.name} ({len(song_ids)} songs)")
+            playlist_id = spotify.create_playlist(sp, cat.name, song_ids)
+            db.upsert_playlist(Playlist(spotify_id=playlist_id, name=cat.name))
+
+        db.mark_classified(song_ids, cat.name, playlist_id)
+
+    total = sum(len(c.song_ids) for c in result.categories)
+    click.echo(f"Done! Added {total} song(s) to {len(result.categories)} playlist(s).")
+
+
+@main.command()
 def ui():
     """Open the interactive database explorer (Streamlit)."""
     import subprocess
