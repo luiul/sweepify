@@ -1,8 +1,7 @@
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 
-@dataclass
-class Song:
+class Song(BaseModel):
     spotify_id: str
     name: str
     artist: str
@@ -18,8 +17,7 @@ class Song:
     category: str | None = None
 
 
-@dataclass
-class Playlist:
+class Playlist(BaseModel):
     spotify_id: str
     name: str
     created_at: str | None = None

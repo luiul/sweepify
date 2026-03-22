@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 
 from mapa.config import DB_DIR, DB_PATH
 from mapa.models import Playlist, Song
@@ -58,8 +57,16 @@ def upsert_songs(songs: list[Song]) -> int:
             """,
             [
                 (
-                    s.spotify_id, s.name, s.artist, s.album, s.genres,
-                    s.added_at, s.energy, s.valence, s.tempo, s.danceability,
+                    s.spotify_id,
+                    s.name,
+                    s.artist,
+                    s.album,
+                    s.genres,
+                    s.added_at,
+                    s.energy,
+                    s.valence,
+                    s.tempo,
+                    s.danceability,
                 )
                 for s in songs
             ],
@@ -70,7 +77,7 @@ def upsert_songs(songs: list[Song]) -> int:
 def get_unclassified_songs() -> list[Song]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM songs WHERE classified = 0"
+            "SELECT * FROM songs WHERE classified = 0",
         ).fetchall()
         return [_row_to_song(r) for r in rows]
 
@@ -107,25 +114,18 @@ def upsert_playlist(playlist: Playlist) -> None:
 def get_playlists() -> list[Playlist]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM playlists").fetchall()
-        return [
-            Playlist(
-                spotify_id=r["spotify_id"],
-                name=r["name"],
-                created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+        return [Playlist.model_validate(dict(r)) for r in rows]
 
 
 def get_status() -> dict[str, int]:
     with get_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
         classified = conn.execute(
-            "SELECT COUNT(*) FROM songs WHERE classified = 1"
+            "SELECT COUNT(*) FROM songs WHERE classified = 1",
         ).fetchone()[0]
         playlists = conn.execute("SELECT COUNT(*) FROM playlists").fetchone()[0]
         categories = conn.execute(
-            "SELECT COUNT(DISTINCT category) FROM songs WHERE category IS NOT NULL"
+            "SELECT COUNT(DISTINCT category) FROM songs WHERE category IS NOT NULL",
         ).fetchone()[0]
     return {
         "total": total,
@@ -140,26 +140,11 @@ def reset_classifications() -> int:
     """Clear all classification data. Returns number of songs reset."""
     with get_connection() as conn:
         cursor = conn.execute(
-            "UPDATE songs SET classified = 0, category = NULL, playlist_id = NULL "
-            "WHERE classified = 1"
+            "UPDATE songs SET classified = 0, category = NULL, playlist_id = NULL WHERE classified = 1",
         )
         conn.execute("DELETE FROM playlists")
         return cursor.rowcount
 
 
 def _row_to_song(row: sqlite3.Row) -> Song:
-    return Song(
-        spotify_id=row["spotify_id"],
-        name=row["name"],
-        artist=row["artist"],
-        album=row["album"],
-        genres=row["genres"],
-        added_at=row["added_at"],
-        energy=row["energy"],
-        valence=row["valence"],
-        tempo=row["tempo"],
-        danceability=row["danceability"],
-        classified=bool(row["classified"]),
-        playlist_id=row["playlist_id"],
-        category=row["category"],
-    )
+    return Song.model_validate(dict(row))
