@@ -1,0 +1,28 @@
+[project]
+name = "mapa"
+version = "0.1.0"
+description = "Classify your Spotify Liked Songs into playlists using AI"
+readme = "README.md"
+authors = [
+    { name = "luiul", email = "aceitunosoriano@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.86.0",
+    "click>=8.3.1",
+    "python-dotenv>=1.2.2",
+    "spotipy>=2.26.0",
+]
+
+[project.scripts]
+mapa = "mapa.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.12,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.7",
+]
