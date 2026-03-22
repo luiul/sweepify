@@ -36,7 +36,7 @@ cp .env.example .env
 
 Edit `.env` with your credentials:
 
-```
+```shell
 SPOTIPY_CLIENT_ID=your_spotify_client_id
 SPOTIPY_CLIENT_SECRET=your_spotify_client_secret
 SPOTIPY_REDIRECT_URI=http://127.0.0.1:8888/callback
@@ -76,15 +76,15 @@ On your first run, a browser window will open for Spotify authorization. Grant t
 
 ## Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `SPOTIPY_CLIENT_ID` | | Spotify app client ID |
-| `SPOTIPY_CLIENT_SECRET` | | Spotify app client secret |
-| `SPOTIPY_REDIRECT_URI` | `http://127.0.0.1:8888/callback` | OAuth redirect URI |
-| `SWEEPIFY_LLM_PROVIDER` | `bedrock` | LLM provider: `bedrock` or `anthropic` |
-| `ANTHROPIC_API_KEY` | | Anthropic API key (only for `anthropic` provider) |
-| `SWEEPIFY_PLAYLIST_PREFIX` | `sweepify:` | Prefix for created playlist names |
-| `SWEEPIFY_DB_DIR` | `~/.sweepify` | Directory for the local SQLite database |
+| Variable                   | Default                          | Description                                       |
+| -------------------------- | -------------------------------- | ------------------------------------------------- |
+| `SPOTIPY_CLIENT_ID`        |                                  | Spotify app client ID                             |
+| `SPOTIPY_CLIENT_SECRET`    |                                  | Spotify app client secret                         |
+| `SPOTIPY_REDIRECT_URI`     | `http://127.0.0.1:8888/callback` | OAuth redirect URI                                |
+| `SWEEPIFY_LLM_PROVIDER`    | `bedrock`                        | LLM provider: `bedrock` or `anthropic`            |
+| `ANTHROPIC_API_KEY`        |                                  | Anthropic API key (only for `anthropic` provider) |
+| `SWEEPIFY_PLAYLIST_PREFIX` | `sweepify:`                      | Prefix for created playlist names                 |
+| `SWEEPIFY_DB_DIR`          | `~/.sweepify`                    | Directory for the local SQLite database           |
 
 ## How it works
 
