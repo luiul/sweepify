@@ -158,6 +158,31 @@ def _enrich_with_genres(
     return enriched
 
 
+def fetch_sweepify_playlists(sp: spotipy.Spotify) -> dict[str, str]:
+    """Fetch existing sweepify-prefixed playlists from Spotify.
+
+    Returns a dict mapping category name to playlist ID.
+    """
+    playlists: dict[str, str] = {}
+    offset = 0
+
+    while True:
+        results = sp.current_user_playlists(limit=50, offset=offset)
+        items = results.get("items", [])
+        if not items:
+            break
+        for item in items:
+            name = item["name"]
+            if name.startswith(PLAYLIST_PREFIX):
+                category = name[len(PLAYLIST_PREFIX):].strip()
+                playlists[category] = item["id"]
+        offset += len(items)
+        if not results.get("next"):
+            break
+
+    return playlists
+
+
 def create_playlist(
     sp: spotipy.Spotify, category_name: str, song_ids: list[str]
 ) -> str:

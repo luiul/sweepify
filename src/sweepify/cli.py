@@ -80,6 +80,13 @@ def _create() -> int:
     click.echo("Connecting to Spotify...")
     sp = spotify.get_client()
 
+    # Sync existing sweepify playlists from Spotify into local DB
+    remote_playlists = spotify.fetch_sweepify_playlists(sp)
+    if remote_playlists:
+        click.echo(f"Found {len(remote_playlists)} existing sweepify playlist(s) on Spotify.")
+        for category, pid in remote_playlists.items():
+            db.upsert_playlist(Playlist(spotify_id=pid, name=category))
+
     for category, songs in songs_by_cat.items():
         song_ids = [s.spotify_id for s in songs]
         existing = db.get_playlist_by_name(category)
