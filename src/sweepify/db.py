@@ -1,7 +1,7 @@
 import sqlite3
 
 from sweepify.config import DB_DIR, DB_PATH
-from sweepify.models import Playlist, Song, generate_create_table, get_insert_columns
+from sweepify.models import Playlist, Song, generate_create_table, get_insert_columns, _resolve_sqlite_type
 
 
 def _ensure_db_dir() -> None:
@@ -15,10 +15,26 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, model: type, table_name: str) -> None:
+    """Add any missing columns to an existing table based on the model."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    for name, info in model.model_fields.items():
+        if name not in existing:
+            col_type = _resolve_sqlite_type(info.annotation)
+            default_clause = ""
+            if info.default is not None and not info.is_required():
+                if isinstance(info.default, bool):
+                    default_clause = f" DEFAULT {int(info.default)}"
+                elif isinstance(info.default, (int, float)):
+                    default_clause = f" DEFAULT {info.default}"
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {col_type}{default_clause}")
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(generate_create_table(Song, "songs"))
         conn.execute(generate_create_table(Playlist, "playlists"))
+        _ensure_columns(conn, Song, "songs")
 
 
 # --- Songs ---
@@ -47,10 +63,34 @@ def get_unclassified_songs() -> list[Song]:
         return [Song.model_validate(dict(r)) for r in rows]
 
 
+def get_unenriched_songs() -> list[Song]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM songs WHERE enriched = 0",
+        ).fetchall()
+        return [Song.model_validate(dict(r)) for r in rows]
+
+
 def get_all_songs() -> list[Song]:
     with get_connection() as conn:
         rows = conn.execute("SELECT * FROM songs").fetchall()
         return [Song.model_validate(dict(r)) for r in rows]
+
+
+def mark_enriched(enrichments: list[dict]) -> None:
+    """Update songs with AI-enriched metadata and set enriched = 1."""
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            UPDATE songs
+            SET mood = ?, bpm = ?, vibe = ?, related_artists = ?, enriched = 1
+            WHERE spotify_id = ?
+            """,
+            [
+                (e["mood"], e["bpm"], e["vibe"], e["related_artists"], e["spotify_id"])
+                for e in enrichments
+            ],
+        )
 
 
 def mark_classified(song_ids: list[str], category: str, playlist_id: str) -> None:
@@ -130,6 +170,9 @@ def get_songs_by_genres(genres: list[str]) -> list[Song]:
 def get_status() -> dict[str, int]:
     with get_connection() as conn:
         total = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        enriched = conn.execute(
+            "SELECT COUNT(*) FROM songs WHERE enriched = 1",
+        ).fetchone()[0]
         classified = conn.execute(
             "SELECT COUNT(*) FROM songs WHERE classified = 1",
         ).fetchone()[0]
@@ -139,6 +182,7 @@ def get_status() -> dict[str, int]:
         ).fetchone()[0]
     return {
         "total": total,
+        "enriched": enriched,
         "classified": classified,
         "unclassified": total - classified,
         "playlists": playlists,
@@ -153,4 +197,14 @@ def reset_classifications() -> int:
             "UPDATE songs SET classified = 0, category = NULL, playlist_id = NULL WHERE classified = 1",
         )
         conn.execute("DELETE FROM playlists")
+        return cursor.rowcount
+
+
+def reset_enrichments() -> int:
+    """Clear all enrichment data. Returns number of songs reset."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE songs SET enriched = 0, mood = NULL, bpm = NULL, vibe = NULL, related_artists = NULL "
+            "WHERE enriched = 1",
+        )
         return cursor.rowcount

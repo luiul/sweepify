@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from sweepify.classifier import (
     ClassificationResult,
     _build_user_prompt,
+    _format_songs_for_prompt,
     _merge_categories,
     Category,
     classify_songs,
@@ -82,6 +83,43 @@ def test_build_user_prompt_first_batch():
     assert "t1" in prompt
     assert "My Song" in prompt
     assert "The Band" in prompt
+
+
+def test_format_songs_includes_enriched_data():
+    song = Song(
+        spotify_id="t1", name="Song", artist="Artist", album="Album",
+        genres='["rock"]', enriched=True, mood="chill", bpm=95,
+        vibe="late night drive", related_artists='["Artist B", "Artist C"]',
+    )
+    prompt = _format_songs_for_prompt([song])
+
+    assert "mood: chill" in prompt
+    assert "bpm: 95" in prompt
+    assert "vibe: late night drive" in prompt
+    assert "related:" in prompt
+    assert "Artist B" in prompt
+
+
+def test_format_songs_includes_audio_features():
+    song = Song(
+        spotify_id="t1", name="Song", artist="Artist", album="Album",
+        genres='["rock"]', tempo=120.0, energy=0.8, danceability=0.7, valence=0.6,
+    )
+    prompt = _format_songs_for_prompt([song])
+
+    assert "tempo: 120" in prompt
+    assert "energy: 0.80" in prompt
+    assert "dance: 0.70" in prompt
+    assert "valence: 0.60" in prompt
+
+
+def test_format_songs_excludes_enrichment_when_not_enriched():
+    song = _make_song("t1")
+    prompt = _format_songs_for_prompt([song])
+
+    assert "mood:" not in prompt
+    assert "bpm:" not in prompt
+    assert "tempo:" not in prompt
 
 
 def test_build_user_prompt_followup_batch():

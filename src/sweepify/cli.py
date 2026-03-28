@@ -1,3 +1,5 @@
+import json
+
 import click
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
@@ -38,6 +40,7 @@ def _fetch(playlist: str | None = None) -> list[str]:
     with _make_progress() as progress:
         fetch_task = progress.add_task(f"Fetching songs from {source}", total=None)
         genre_task = progress.add_task("Enriching genres", total=None, visible=False)
+        audio_task = progress.add_task("Audio features", total=None, visible=False)
 
         def on_fetch(fetched: int, total: int) -> None:
             progress.update(fetch_task, completed=fetched, total=total)
@@ -45,15 +48,70 @@ def _fetch(playlist: str | None = None) -> list[str]:
         def on_genre(processed: int, total: int) -> None:
             progress.update(genre_task, completed=processed, total=total, visible=True)
 
-        songs = spotify.fetch_liked_songs(sp, playlist=playlist, on_progress=on_fetch, on_genre_progress=on_genre)
+        def on_audio(processed: int, total: int) -> None:
+            progress.update(audio_task, completed=processed, total=total, visible=True)
+
+        songs = spotify.fetch_liked_songs(
+            sp, playlist=playlist,
+            on_progress=on_fetch, on_genre_progress=on_genre, on_audio_progress=on_audio,
+        )
         progress.update(fetch_task, completed=progress.tasks[fetch_task].total or len(songs))
         progress.update(genre_task, completed=progress.tasks[genre_task].total or 0, visible=progress.tasks[genre_task].visible)
+        progress.update(audio_task, completed=progress.tasks[audio_task].total or 0, visible=progress.tasks[audio_task].visible)
 
     console.print(f"Fetched {len(songs)} song(s) from Spotify.")
 
     count = db.upsert_songs(songs)
     console.print(f"Added {count} new song(s) to local database.")
     return [s.spotify_id for s in songs]
+
+
+def _enrich(song_ids: list[str] | None = None, force: bool = False) -> int:
+    """Enrich songs with AI metadata. Returns number of songs enriched."""
+    from sweepify import enricher
+
+    if force:
+        reset_count = db.reset_enrichments()
+        if reset_count:
+            console.print(f"Reset enrichment for {reset_count} song(s).")
+
+    songs = db.get_unenriched_songs()
+    if song_ids is not None:
+        allowed = set(song_ids)
+        songs = [s for s in songs if s.spotify_id in allowed]
+
+    if not songs:
+        console.print("No unenriched songs found.")
+        return 0
+
+    console.print(f"Enriching {len(songs)} song(s) with Claude...")
+    client = enricher.get_client()
+    enriched_count = 0
+
+    with _make_progress() as progress:
+        task = progress.add_task("Enriching songs", total=len(songs))
+
+        def on_progress(batch: int, total: int, size: int) -> None:
+            progress.advance(task, size)
+
+        def on_batch_done(result: enricher.EnrichmentResult) -> None:
+            nonlocal enriched_count
+            db.mark_enriched([
+                {
+                    "spotify_id": e.spotify_id,
+                    "mood": e.mood,
+                    "bpm": e.bpm,
+                    "vibe": e.vibe,
+                    "related_artists": json.dumps(e.related_artists),
+                }
+                for e in result.songs
+            ])
+            enriched_count += len(result.songs)
+
+        enricher.enrich_songs(client, songs, on_progress=on_progress, on_batch_done=on_batch_done)
+
+    console.print(f"Enriched {enriched_count} song(s).")
+    return enriched_count
 
 
 def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int:
@@ -179,6 +237,21 @@ def classify(playlist: str | None, max_playlists: int):
 
 
 @main.command()
+@click.option("--playlist", "-p", default=None, help="Only enrich songs from this playlist (name or ID).")
+@click.option("--force", "-f", is_flag=True, help="Re-enrich already enriched songs.")
+def enrich(playlist: str | None, force: bool):
+    """Enrich songs with AI-generated metadata (mood, BPM, vibe, related artists)."""
+    song_ids = None
+    if playlist:
+        from sweepify import spotify
+        console.print("Resolving playlist...")
+        sp = spotify.get_client()
+        songs = spotify.fetch_liked_songs(sp, playlist=playlist)
+        song_ids = [s.spotify_id for s in songs]
+    _enrich(song_ids=song_ids, force=force)
+
+
+@main.command()
 def create():
     """Create Spotify playlists and add classified songs."""
     _create()
@@ -188,22 +261,29 @@ def create():
 @click.option("--playlist", "-p", default=None, help="Fetch from a specific playlist instead of Liked Songs.")
 @click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of playlists to create. Use 0 to only classify into existing playlists.")
 def run(playlist: str | None, max_playlists: int):
-    """Run full pipeline: fetch → classify → create."""
-    console.rule("[bold]Step 1/3: Fetch")
+    """Run full pipeline: fetch → enrich → classify → create."""
+    console.rule("[bold]Step 1/4: Fetch")
     try:
         fetched_ids = _fetch(playlist=playlist)
     except Exception as e:
         console.print(f"[red]Error during fetch: {e}[/red]")
         raise click.Abort()
 
-    console.rule("[bold]Step 2/3: Classify")
+    console.rule("[bold]Step 2/4: Enrich")
+    try:
+        _enrich(song_ids=fetched_ids if playlist else None)
+    except Exception as e:
+        console.print(f"[red]Error during enrichment: {e}[/red]")
+        raise click.Abort()
+
+    console.rule("[bold]Step 3/4: Classify")
     try:
         _classify(song_ids=fetched_ids if playlist else None, max_playlists=max_playlists)
     except Exception as e:
         console.print(f"[red]Error during classify: {e}[/red]")
         raise click.Abort()
 
-    console.rule("[bold]Step 3/3: Create Playlists")
+    console.rule("[bold]Step 4/4: Create Playlists")
     try:
         _create()
     except Exception as e:
@@ -221,6 +301,7 @@ def status():
     table.add_column("Metric", style="bold")
     table.add_column("Value", justify="right")
     table.add_row("Total songs", str(s['total']))
+    table.add_row("Enriched", str(s['enriched']))
     table.add_row("Classified", str(s['classified']))
     table.add_row("Unclassified", str(s['unclassified']))
     table.add_row("Categories", str(s['categories']))
@@ -229,10 +310,14 @@ def status():
 
 
 @main.command()
-def reset():
+@click.option("--enrichment", is_flag=True, help="Also reset enrichment data (mood, BPM, vibe, related artists).")
+def reset(enrichment: bool):
     """Clear all classification data (keeps songs)."""
     count = db.reset_classifications()
     console.print(f"Reset {count} song(s). Playlists cleared.")
+    if enrichment:
+        enrich_count = db.reset_enrichments()
+        console.print(f"Reset enrichment for {enrich_count} song(s).")
 
 
 @main.command()

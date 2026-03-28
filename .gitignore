@@ -19,3 +19,6 @@ wheels/
 # Tools
 .ruff_cache/
 .pytest_cache/
+
+# Claude
+.claude

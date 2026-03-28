@@ -1,14 +1,13 @@
 import json
+import threading
+from datetime import timedelta
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from sweepify.config import DB_PATH, PLAYLIST_PREFIX
+from sweepify.config import DB_PATH
 from sweepify.db import get_connection, get_songs_by_genres, get_status, init_db
-
-COLORS = ["#1DB954", "#1ED760", "#2EBD59", "#57B660", "#A0E8AF",
-          "#B497D6", "#E8A0BF", "#F2C57C", "#7EC8E3", "#FF6B6B"]
 
 st.set_page_config(page_title="sweepify", page_icon="🧹", layout="wide")
 
@@ -27,24 +26,424 @@ st.sidebar.caption(f"DB: `{DB_PATH}`")
 
 status = get_status()
 st.sidebar.metric("Total songs", status["total"])
-cols = st.sidebar.columns(2)
-cols[0].metric("Classified", status["classified"])
-cols[1].metric("Unclassified", status["unclassified"])
+cols = st.sidebar.columns(3)
+cols[0].metric("Enriched", status["enriched"])
+cols[1].metric("Classified", status["classified"])
+cols[2].metric("Unclassified", status["unclassified"])
 st.sidebar.metric("Categories", status["categories"])
 st.sidebar.metric("Playlists", status["playlists"])
 
-view = st.sidebar.radio("View", ["Songs", "Genres", "Playlists", "Playlist Builder", "SQL"])
+view = st.sidebar.radio("View", ["Actions", "Songs", "Genres", "Enrichment", "Playlists", "Playlist Builder", "SQL"])
+
+
+# --- Action state (plain dict so background threads can read/write safely) ---
+
+if "action" not in st.session_state:
+    st.session_state.action = {
+        "running": None,  # action name or None
+        "cancel": False,  # set True to request stop
+        "progress": "",  # text description of current step
+        "pct": 0.0,  # 0.0 – 1.0
+        "result": None,  # ("success"|"warning"|"error", message)
+        "thread": None,  # threading.Thread reference
+        "gen": 0,  # generation counter — prevents abandoned threads from overwriting state
+    }
+
+# Grab a direct reference — safe to use from any thread (it's just a dict)
+_action = st.session_state.action
+
+# --- Sticky sidebar notification (auto-refreshing fragment, visible on all tabs) ---
+
+
+@st.fragment(run_every=timedelta(seconds=2))
+def _action_monitor():
+    """Polls background thread progress every 2s without blocking the main script."""
+    if _action["running"]:
+        thread = _action["thread"]
+        if thread is not None and not thread.is_alive():
+            # Thread finished between fragment reruns
+            _action["running"] = None
+            _action["thread"] = None
+            st.rerun(scope="app")
+            return
+        progress = _action["progress"] or "Starting..."
+        st.info(f"**{_action['running']}** — {progress}")
+        st.progress(_action["pct"])
+        if st.button("Stop", key="monitor_stop", type="primary", use_container_width=True):
+            _action["cancel"] = True
+            _action["running"] = None
+            _action["progress"] = ""
+            _action["pct"] = 0.0
+            _action["result"] = ("warning", "Cancelled. Progress saved to database.")
+            st.rerun(scope="app")
+    elif _action["result"]:
+        level, msg = _action["result"]
+        if level == "success":
+            st.success(msg)
+        elif level == "warning":
+            st.warning(msg)
+        else:
+            st.error(msg)
+        if st.button("Dismiss", key="monitor_dismiss"):
+            _action["result"] = None
+            st.rerun(scope="app")
+
+
+with st.sidebar:
+    _action_monitor()
+
+_action_is_live = bool(_action["running"])
+
+
+# --- Background action helpers ---
+
+
+class CancelledError(Exception):
+    pass
+
+
+def _check_cancel():
+    if _action["cancel"]:
+        _action["cancel"] = False
+        raise CancelledError
+
+
+def _update_progress(text: str, pct: float | None = None) -> None:
+    _action["progress"] = text
+    if pct is not None:
+        _action["pct"] = min(max(pct, 0.0), 1.0)
+
+
+def _do_fetch(playlist: str | None) -> str:
+    from sweepify import db, spotify
+
+    sp = spotify.get_client()
+    source = f"playlist '{playlist}'" if playlist else "Liked Songs"
+    _update_progress(f"Connecting to Spotify ({source})...", 0.0)
+
+    def on_fetch(fetched: int, total: int) -> None:
+        _check_cancel()
+        pct = fetched / total if total else 0
+        _update_progress(f"Fetching: {fetched}/{total} songs", pct * 0.5)
+
+    def on_genre(processed: int, total: int) -> None:
+        _check_cancel()
+        pct = processed / total if total else 0
+        _update_progress(f"Genres: {processed}/{total} artists", 0.5 + pct * 0.25)
+
+    def on_audio(processed: int, total: int) -> None:
+        _check_cancel()
+        pct = processed / total if total else 0
+        _update_progress(f"Audio features: {processed}/{total} tracks", 0.75 + pct * 0.2)
+
+    songs = spotify.fetch_liked_songs(
+        sp,
+        playlist=playlist,
+        on_progress=on_fetch,
+        on_genre_progress=on_genre,
+        on_audio_progress=on_audio,
+    )
+
+    _update_progress("Saving to database...", 0.95)
+    count = db.upsert_songs(songs)
+    return f"Fetched {len(songs)} song(s). Added {count} new to database."
+
+
+def _do_enrich(force: bool) -> str:
+    from sweepify import db, enricher
+    from sweepify.classifier import get_client
+
+    if force:
+        db.reset_enrichments()
+
+    songs = db.get_unenriched_songs()
+    if not songs:
+        return "No unenriched songs found."
+
+    total = len(songs)
+    _update_progress(f"Enriching: 0/{total} songs", 0.0)
+    client = get_client()
+    enriched_count = 0
+
+    def on_progress(batch: int, total_batches: int, size: int) -> None:
+        pass
+
+    def on_batch_done(result: enricher.EnrichmentResult) -> None:
+        nonlocal enriched_count
+        db.mark_enriched(
+            [
+                {
+                    "spotify_id": e.spotify_id,
+                    "mood": e.mood,
+                    "bpm": e.bpm,
+                    "vibe": e.vibe,
+                    "related_artists": json.dumps(e.related_artists),
+                }
+                for e in result.songs
+            ],
+        )
+        enriched_count += len(result.songs)
+        _update_progress(f"Enriching: {enriched_count}/{total} songs", enriched_count / total)
+        _check_cancel()
+
+    enricher.enrich_songs(client, songs, on_progress=on_progress, on_batch_done=on_batch_done)
+    return f"Enriched {enriched_count} song(s)."
+
+
+def _do_classify(max_playlists: int) -> str:
+    from sweepify import classifier, db, spotify
+
+    songs = db.get_unclassified_songs()
+    if not songs:
+        return "No unclassified songs found."
+
+    fixed_categories = None
+    if max_playlists == 0:
+        sp = spotify.get_client()
+        existing = spotify.fetch_sweepify_playlists(sp)
+        if not existing:
+            return "No existing sweepify playlists found. Use max > 0 to create new ones."
+        fixed_categories = list(existing.keys())
+
+    total = len(songs)
+    _update_progress(f"Classifying: 0/{total} songs", 0.0)
+    client = classifier.get_client()
+    classified_count = 0
+
+    def on_progress(batch: int, total_batches: int, size: int) -> None:
+        pass
+
+    def on_batch_done(result: classifier.ClassificationResult) -> None:
+        nonlocal classified_count
+        for cat in result.categories:
+            db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+            classified_count += len(cat.song_ids)
+        _update_progress(f"Classifying: {classified_count}/{total} songs", classified_count / total)
+        _check_cancel()
+
+    result = classifier.classify_songs(
+        client,
+        songs,
+        on_progress=on_progress,
+        on_batch_done=on_batch_done,
+        max_playlists=max_playlists,
+        fixed_categories=fixed_categories,
+    )
+    summary = ", ".join(f"{c.name} ({len(c.song_ids)})" for c in result.categories)
+    return f"Classified {classified_count} song(s) into {len(result.categories)} categories: {summary}"
+
+
+def _do_create() -> str:
+    from sweepify import db, spotify
+    from sweepify.models import Playlist
+
+    songs_by_cat = db.get_songs_by_category()
+    if not songs_by_cat:
+        return "No classified songs pending playlist creation."
+
+    sp = spotify.get_client()
+    remote_playlists = spotify.fetch_sweepify_playlists(sp)
+    for category, pid in remote_playlists.items():
+        db.upsert_playlist(Playlist(spotify_id=pid, name=category))
+
+    total = len(songs_by_cat)
+    _update_progress(f"Creating playlists: 0/{total}", 0.0)
+    done = 0
+
+    for category, songs in songs_by_cat.items():
+        song_ids = [s.spotify_id for s in songs]
+        existing = db.get_playlist_by_name(category)
+
+        if existing:
+            spotify.add_to_existing_playlist(sp, existing.spotify_id, song_ids)
+            playlist_id = existing.spotify_id
+        else:
+            playlist_id = spotify.create_playlist(sp, category, song_ids)
+            db.upsert_playlist(Playlist(spotify_id=playlist_id, name=category))
+
+        db.mark_classified(song_ids, category, playlist_id)
+        done += 1
+        _update_progress(f"Creating playlists: {done}/{total}", done / total)
+        _check_cancel()
+
+    return f"Processed {total} playlist(s)."
+
+
+def _do_clear() -> str:
+    from sweepify import db, spotify
+
+    sp = spotify.get_client()
+    playlists = spotify.fetch_sweepify_playlists(sp)
+    if not playlists:
+        count = db.reset_classifications()
+        return f"No sweepify playlists on Spotify. Reset {count} local classification(s)."
+
+    total = len(playlists)
+    _update_progress(f"Deleting playlists: 0/{total}", 0.0)
+
+    def on_progress(deleted: int, total: int) -> None:
+        _check_cancel()
+        _update_progress(f"Deleting playlists: {deleted}/{total}", deleted / total)
+
+    deleted = spotify.delete_sweepify_playlists(sp, on_progress=on_progress)
+    count = db.reset_classifications()
+    return f"Deleted {len(deleted)} playlist(s). Reset {count} classification(s)."
+
+
+def _do_full_pipeline(playlist: str | None, max_playlists: int) -> str:
+    steps = [
+        ("1/4 Fetch", _do_fetch, [playlist]),
+        ("2/4 Enrich", _do_enrich, [False]),
+        ("3/4 Classify", _do_classify, [max_playlists]),
+        ("4/4 Create", _do_create, []),
+    ]
+    results = []
+    for label, fn, fn_args in steps:
+        _action["progress"] = f"Step {label}..."
+        _action["pct"] = 0.0
+        msg = fn(*fn_args)
+        results.append(f"{label}: {msg}")
+    return " | ".join(results)
+
+
+def _run_action(name: str, action, *args):
+    """Start an action in a background thread."""
+    if _action["running"]:
+        st.warning(f"**{_action['running']}** is already running. Stop it first.")
+        return
+
+    _action["gen"] += 1
+    my_gen = _action["gen"]
+    _action["running"] = name
+    _action["cancel"] = False
+    _action["progress"] = "Starting..."
+    _action["pct"] = 0.0
+    _action["result"] = None
+
+    def _worker():
+        try:
+            msg = action(*args)
+            if _action["gen"] == my_gen:
+                _action["result"] = ("success", msg)
+        except CancelledError:
+            if _action["gen"] == my_gen:
+                _action["result"] = ("warning", "Cancelled. Progress saved to database.")
+        except Exception as e:
+            if _action["gen"] == my_gen:
+                _action["result"] = ("error", f"Error: {e}")
+        finally:
+            if _action["gen"] == my_gen:
+                _action["running"] = None
+                _action["progress"] = ""
+                _action["pct"] = 0.0
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    _action["thread"] = thread
+    st.rerun()
+
 
 # --- Main area ---
 
-if view == "Songs":
+if view == "Actions":
+    st.header("Actions")
+    st.caption("Run pipeline steps directly from the UI.")
+
+    # Show inline progress when on this tab
+    if _action_is_live:
+        st.progress(_action["pct"], text=_action["progress"] or "Working...")
+
+    # --- Pipeline steps ---
+    st.subheader("Pipeline")
+
+    pipeline_cols = st.columns(4)
+    _disabled = _action_is_live  # Disable buttons while action is running
+
+    with pipeline_cols[0]:
+        st.markdown("**1. Fetch**")
+        st.caption("Pull songs from Spotify")
+        fetch_playlist = st.text_input("Playlist (optional)", key="fetch_playlist", placeholder="Liked Songs")
+        if st.button("Fetch", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Fetch", _do_fetch, fetch_playlist or None)
+
+    with pipeline_cols[1]:
+        st.markdown("**2. Enrich**")
+        st.caption("Add AI metadata (mood, BPM, vibe)")
+        enrich_force = st.checkbox("Re-enrich all", key="enrich_force")
+        if st.button("Enrich", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Enrich", _do_enrich, enrich_force)
+
+    with pipeline_cols[2]:
+        st.markdown("**3. Classify**")
+        st.caption("Group songs into playlists with AI")
+        classify_max = st.number_input("Max playlists", min_value=0, max_value=30, value=10, key="classify_max")
+        if st.button("Classify", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Classify", _do_classify, int(classify_max))
+
+    with pipeline_cols[3]:
+        st.markdown("**4. Create**")
+        st.caption("Push playlists to Spotify")
+        if st.button("Create Playlists", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Create", _do_create)
+
+    st.divider()
+
+    # --- Full pipeline ---
+    st.subheader("Full Pipeline")
+    st.caption("Run all steps in sequence: fetch, enrich, classify, create.")
+    run_cols = st.columns([2, 1, 1])
+    with run_cols[0]:
+        run_playlist = st.text_input("Playlist (optional)", key="run_playlist", placeholder="Liked Songs")
+    with run_cols[1]:
+        run_max = st.number_input("Max playlists", min_value=1, max_value=30, value=10, key="run_max")
+
+    with run_cols[2]:
+        st.write("")  # spacer
+        st.write("")  # spacer
+        if st.button("Run Full Pipeline", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Pipeline", _do_full_pipeline, run_playlist or None, int(run_max))
+
+    st.divider()
+
+    # --- Maintenance ---
+    st.subheader("Maintenance")
+    maint_cols = st.columns(3)
+
+    with maint_cols[0]:
+        st.markdown("**Reset**")
+        st.caption("Clear classifications (keeps songs)")
+        reset_enrichment = st.checkbox("Also reset enrichment", key="reset_enrichment")
+        if st.button("Reset", use_container_width=True, disabled=_disabled):
+            from sweepify import db as _db
+
+            count = _db.reset_classifications()
+            msg = f"Reset {count} song(s). Playlists cleared."
+            if reset_enrichment:
+                enrich_count = _db.reset_enrichments()
+                msg += f" Reset enrichment for {enrich_count} song(s)."
+            _action["result"] = ("success", msg)
+            st.rerun()
+
+    with maint_cols[1]:
+        st.markdown("**Clear**")
+        st.caption("Delete playlists from Spotify and reset")
+        if st.button("Clear All", use_container_width=True, disabled=_disabled):
+            _run_action("Clear", _do_clear)
+
+    with maint_cols[2]:
+        st.markdown("**Status**")
+        st.caption("Refresh sidebar metrics")
+        if st.button("Refresh", use_container_width=True):
+            st.rerun()
+
+elif view == "Songs":
     st.header("Songs")
     df = load_table("songs")
 
     if df.empty:
         st.info("No songs yet. Run `sweepify fetch` to get started.")
     else:
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             search = st.text_input("Search (name or artist)")
         with col2:
@@ -53,18 +452,24 @@ if view == "Songs":
         with col3:
             artists = ["All"] + sorted(df["artist"].dropna().unique().tolist())
             artist_filter = st.selectbox("Artist", artists)
+        with col4:
+            moods = ["All"] + sorted(df["mood"].dropna().unique().tolist())
+            mood_filter = st.selectbox("Mood", moods)
 
         filtered = df.copy()
         if search:
-            mask = (
-                filtered["name"].str.contains(search, case=False, na=False)
-                | filtered["artist"].str.contains(search, case=False, na=False)
+            mask = filtered["name"].str.contains(search, case=False, na=False) | filtered["artist"].str.contains(
+                search,
+                case=False,
+                na=False,
             )
             filtered = filtered[mask]
         if cat_filter != "All":
             filtered = filtered[filtered["category"] == cat_filter]
         if artist_filter != "All":
             filtered = filtered[filtered["artist"] == artist_filter]
+        if mood_filter != "All":
+            filtered = filtered[filtered["mood"] == mood_filter]
 
         st.dataframe(filtered, use_container_width=True, hide_index=True)
         st.caption(f"Showing {len(filtered)} of {len(df)} songs")
@@ -152,18 +557,82 @@ elif view == "Genres":
             # Songs by selected genre
             st.subheader("Browse by Genre")
             selected_genre = st.selectbox(
-                "Select a genre", genre_counts.index.tolist()
+                "Select a genre",
+                genre_counts.index.tolist(),
             )
             if selected_genre:
-                genre_songs = exploded[
-                    exploded["genre_list"] == selected_genre
-                ][["name", "artist", "album", "popularity", "release_date"]]
+                genre_songs = exploded[exploded["genre_list"] == selected_genre][
+                    ["name", "artist", "album", "popularity", "release_date"]
+                ]
                 st.dataframe(
-                    genre_songs, use_container_width=True, hide_index=True
+                    genre_songs,
+                    use_container_width=True,
+                    hide_index=True,
                 )
                 st.caption(
-                    f"{len(genre_songs)} songs in '{selected_genre}'"
+                    f"{len(genre_songs)} songs in '{selected_genre}'",
                 )
+
+elif view == "Enrichment":
+    st.header("Enrichment Overview")
+    df = load_table("songs")
+
+    if df.empty:
+        st.info("No songs yet. Run `sweepify fetch` to get started.")
+    else:
+        enriched_df = df[df["enriched"] == 1]
+        if enriched_df.empty:
+            st.info("No enriched songs yet. Run `sweepify enrich` to get started.")
+        else:
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.subheader("Mood Distribution")
+                mood_counts = enriched_df["mood"].value_counts().reset_index()
+                mood_counts.columns = ["mood", "songs"]
+                fig_mood = px.bar(
+                    mood_counts,
+                    x="songs",
+                    y="mood",
+                    orientation="h",
+                    color="songs",
+                    color_continuous_scale=["#1A1E2E", "#1DB954"],
+                )
+                fig_mood.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    yaxis={"categoryorder": "total ascending"},
+                    coloraxis_showscale=False,
+                    margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                    height=max(300, len(mood_counts) * 30),
+                )
+                st.plotly_chart(fig_mood, use_container_width=True, theme="streamlit")
+
+            with col2:
+                st.subheader("BPM Distribution")
+                bpm_data = enriched_df["bpm"].dropna()
+                if not bpm_data.empty:
+                    fig_bpm = px.histogram(
+                        enriched_df,
+                        x="bpm",
+                        nbins=30,
+                        color_discrete_sequence=["#1DB954"],
+                    )
+                    fig_bpm.update_layout(
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                        height=300,
+                    )
+                    st.plotly_chart(fig_bpm, use_container_width=True, theme="streamlit")
+
+            # Vibe word cloud / table
+            st.subheader("Top Vibes")
+            vibe_counts = enriched_df["vibe"].value_counts().head(20).reset_index()
+            vibe_counts.columns = ["vibe", "songs"]
+            st.dataframe(vibe_counts, use_container_width=True, hide_index=True)
+
+            st.caption(f"{len(enriched_df)} of {len(df)} songs enriched")
 
 elif view == "Playlists":
     st.header("Playlists")
@@ -194,15 +663,12 @@ elif view == "Playlist Builder":
         playlists_df = load_table("playlists")
         if not playlists_df.empty:
             st.subheader("Existing Sweepify Playlists")
-            # Count songs per playlist
-            songs_per_playlist = (
-                df[df["category"].notna()]
-                .groupby("category")
-                .size()
-                .reset_index(name="songs")
-            )
+            songs_per_playlist = df[df["category"].notna()].groupby("category").size().reset_index(name="songs")
             playlist_info = playlists_df.merge(
-                songs_per_playlist, left_on="name", right_on="category", how="left",
+                songs_per_playlist,
+                left_on="name",
+                right_on="category",
+                how="left",
             )[["name", "spotify_id", "songs"]].fillna(0)
             playlist_info["songs"] = playlist_info["songs"].astype(int)
             st.dataframe(playlist_info, use_container_width=True, hide_index=True)
@@ -223,7 +689,10 @@ elif view == "Playlist Builder":
             )
         with col2:
             max_playlists = st.number_input(
-                "Max playlists", min_value=1, max_value=20, value=1,
+                "Max playlists",
+                min_value=1,
+                max_value=20,
+                value=1,
             )
 
         # Preview matching songs
@@ -232,10 +701,7 @@ elif view == "Playlist Builder":
             st.caption(f"{len(matching)} song(s) match the selected genres")
 
             if matching:
-                match_df = pd.DataFrame([
-                    {"name": s.name, "artist": s.artist, "genres": s.genres}
-                    for s in matching
-                ])
+                match_df = pd.DataFrame([{"name": s.name, "artist": s.artist, "genres": s.genres} for s in matching])
                 with st.expander(f"Preview ({len(matching)} songs)"):
                     st.dataframe(match_df, use_container_width=True, hide_index=True)
 
@@ -256,7 +722,11 @@ elif view == "SQL":
     st.header("SQL Playground")
     query = st.text_area(
         "Query",
-        value="SELECT category, COUNT(*) as count FROM songs\nWHERE classified = 1\nGROUP BY category\nORDER BY count DESC;",
+        value=(
+            "SELECT category, COUNT(*) as count FROM songs\n"
+            "WHERE classified = 1\n"
+            "GROUP BY category\nORDER BY count DESC;"
+        ),
         height=120,
     )
     if st.button("Run"):

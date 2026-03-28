@@ -80,6 +80,48 @@ def test_fetch_liked_songs_empty():
     assert songs == []
 
 
+def test_audio_features_enrichment():
+    sp = MagicMock()
+    sp.current_user_saved_tracks.return_value = {
+        "items": [
+            _make_track("t1", "Song One", "Artist A", "a1"),
+        ],
+        "next": None,
+    }
+    sp.artists.return_value = {
+        "artists": [_make_artist("a1", ["rock"])]
+    }
+    sp.audio_features.return_value = [
+        {"id": "t1", "danceability": 0.8, "energy": 0.7, "valence": 0.6,
+         "tempo": 120.0, "acousticness": 0.1, "instrumentalness": 0.0},
+    ]
+
+    songs = fetch_liked_songs(sp)
+
+    assert songs[0].danceability == 0.8
+    assert songs[0].energy == 0.7
+    assert songs[0].tempo == 120.0
+
+
+def test_audio_features_graceful_failure():
+    """Audio features endpoint restricted — should not crash."""
+    sp = MagicMock()
+    sp.current_user_saved_tracks.return_value = {
+        "items": [_make_track("t1", "Song One", "Artist A", "a1")],
+        "next": None,
+    }
+    sp.artists.return_value = {
+        "artists": [_make_artist("a1", ["rock"])]
+    }
+    sp.audio_features.side_effect = Exception("Restricted endpoint")
+
+    songs = fetch_liked_songs(sp)
+
+    assert len(songs) == 1
+    assert songs[0].danceability is None
+    assert songs[0].tempo is None
+
+
 def test_genres_enrichment():
     sp = MagicMock()
     sp.current_user_saved_tracks.return_value = {
