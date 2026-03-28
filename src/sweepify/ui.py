@@ -37,22 +37,25 @@ st.sidebar.metric("Playlists", status["playlists"])
 view = st.sidebar.radio("View", ["Actions", "Songs", "Genres", "Enrichment", "Playlists", "Playlist Builder", "SQL"])
 
 
-# --- Action state (plain dict so background threads can read/write safely) ---
+# --- Action state (cached at server level so it survives page refreshes) ---
+# st.session_state resets on refresh; cache_resource persists for the server lifetime.
 
-if "action" not in st.session_state:
-    st.session_state.action = {
+
+@st.cache_resource
+def _get_action_state() -> dict:
+    return {
         "running": None,  # action name or None
         "cancel": False,  # set True to request stop
         "progress": "",  # text description of current step
-        "pct": 0.0,  # 0.0 – 1.0
+        "pct": 0.0,  # 0.0 - 1.0
         "result": None,  # ("success"|"warning"|"error", message)
         "thread": None,  # threading.Thread reference
         "gen": 0,  # generation counter -- prevents abandoned threads from overwriting state
         "start_time": None,  # time.monotonic() when action started
     }
 
-# Grab a direct reference — safe to use from any thread (it's just a dict)
-_action = st.session_state.action
+
+_action = _get_action_state()
 
 # --- Sticky sidebar notification (auto-refreshing fragment, visible on all tabs) ---
 
@@ -373,13 +376,17 @@ if view == "Actions":
     st.header("Actions")
     st.caption("Run pipeline steps directly from the UI.")
 
-    # Show inline progress when on this tab
-    if _action_is_live:
-        eta = _format_eta()
-        progress_text = _action["progress"] or "Working..."
-        if eta:
-            progress_text += f" — {eta}"
-        st.progress(_action["pct"], text=progress_text)
+    # Show inline progress when on this tab (auto-refreshes via fragment)
+    @st.fragment(run_every=timedelta(seconds=2) if _action_is_live else None)
+    def _inline_progress():
+        if _action["running"]:
+            eta = _format_eta()
+            progress_text = _action["progress"] or "Working..."
+            if eta:
+                progress_text += f" — {eta}"
+            st.progress(_action["pct"], text=progress_text)
+
+    _inline_progress()
 
     # --- Pipeline steps ---
     st.subheader("Pipeline")
