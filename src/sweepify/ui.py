@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from datetime import timedelta
 
 import pandas as pd
@@ -46,7 +47,8 @@ if "action" not in st.session_state:
         "pct": 0.0,  # 0.0 – 1.0
         "result": None,  # ("success"|"warning"|"error", message)
         "thread": None,  # threading.Thread reference
-        "gen": 0,  # generation counter — prevents abandoned threads from overwriting state
+        "gen": 0,  # generation counter -- prevents abandoned threads from overwriting state
+        "start_time": None,  # time.monotonic() when action started
     }
 
 # Grab a direct reference — safe to use from any thread (it's just a dict)
@@ -55,25 +57,45 @@ _action = st.session_state.action
 # --- Sticky sidebar notification (auto-refreshing fragment, visible on all tabs) ---
 
 
+def _format_eta() -> str:
+    """Return a string like '1m 23s elapsed · ~2m 10s remaining' based on progress."""
+    start = _action["start_time"]
+    pct = _action["pct"]
+    if start is None:
+        return ""
+    elapsed = time.monotonic() - start
+    parts = []
+    em, es = divmod(int(elapsed), 60)
+    parts.append(f"{em}m {es:02d}s elapsed" if em else f"{es}s elapsed")
+    if pct and pct > 0.02:
+        remaining = elapsed / pct * (1 - pct)
+        rm, rs = divmod(int(remaining), 60)
+        parts.append(f"~{rm}m {rs:02d}s remaining" if rm else f"~{rs}s remaining")
+    return " · ".join(parts)
+
+
 @st.fragment(run_every=timedelta(seconds=2))
 def _action_monitor():
-    """Polls background thread progress every 2s without blocking the main script."""
+    """Poll background thread progress every 2s without blocking the main script."""
     if _action["running"]:
         thread = _action["thread"]
         if thread is not None and not thread.is_alive():
-            # Thread finished between fragment reruns
             _action["running"] = None
             _action["thread"] = None
             st.rerun(scope="app")
             return
         progress = _action["progress"] or "Starting..."
+        eta = _format_eta()
         st.info(f"**{_action['running']}** — {progress}")
+        if eta:
+            st.caption(eta)
         st.progress(_action["pct"])
         if st.button("Stop", key="monitor_stop", type="primary", use_container_width=True):
             _action["cancel"] = True
             _action["running"] = None
             _action["progress"] = ""
             _action["pct"] = 0.0
+            _action["start_time"] = None
             _action["result"] = ("warning", "Cancelled. Progress saved to database.")
             st.rerun(scope="app")
     elif _action["result"]:
@@ -319,6 +341,7 @@ def _run_action(name: str, action, *args):
     _action["progress"] = "Starting..."
     _action["pct"] = 0.0
     _action["result"] = None
+    _action["start_time"] = time.monotonic()
 
     def _worker():
         try:
@@ -336,6 +359,7 @@ def _run_action(name: str, action, *args):
                 _action["running"] = None
                 _action["progress"] = ""
                 _action["pct"] = 0.0
+                _action["start_time"] = None
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
@@ -351,7 +375,11 @@ if view == "Actions":
 
     # Show inline progress when on this tab
     if _action_is_live:
-        st.progress(_action["pct"], text=_action["progress"] or "Working...")
+        eta = _format_eta()
+        progress_text = _action["progress"] or "Working..."
+        if eta:
+            progress_text += f" — {eta}"
+        st.progress(_action["pct"], text=progress_text)
 
     # --- Pipeline steps ---
     st.subheader("Pipeline")
