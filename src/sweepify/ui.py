@@ -185,9 +185,24 @@ def _do_enrich(force: bool) -> str:
         return "No unenriched songs found."
 
     total = len(songs)
+    total_batches = (total + enricher.BATCH_SIZE - 1) // enricher.BATCH_SIZE
     _update_progress(f"Enriching: 0/{total} songs", 0.0)
     client = get_client()
     enriched_count = 0
+    batch_status: dict[int, str] = {}  # batch_num -> "processing" | "done"
+
+    def _batch_text() -> str:
+        if total_batches <= 1:
+            return ""
+        parts = []
+        for b in sorted(batch_status):
+            label = f"Batch {b}/{total_batches}"
+            parts.append(f"{label} \u2713" if batch_status[b] == "done" else label)
+        return "\n" + " \u00b7 ".join(parts)
+
+    def on_batch_start(batch_num: int, total: int, size: int) -> None:
+        batch_status[batch_num] = "processing"
+        _update_progress(f"Enriching: {enriched_count}/{total_batches * enricher.BATCH_SIZE} songs{_batch_text()}", enriched_count / total if total else 0)
 
     def on_batch_done(batch_num: int, result: enricher.EnrichmentResult) -> None:
         nonlocal enriched_count
@@ -205,9 +220,10 @@ def _do_enrich(force: bool) -> str:
             ],
         )
         enriched_count += len(result.songs)
-        _update_progress(f"Enriching: {enriched_count}/{total} songs", enriched_count / total)
+        batch_status[batch_num] = "done"
+        _update_progress(f"Enriching: {enriched_count}/{total} songs{_batch_text()}", enriched_count / total)
 
-    enricher.enrich_songs(client, songs, on_batch_done=on_batch_done)
+    enricher.enrich_songs(client, songs, on_batch_start=on_batch_start, on_batch_done=on_batch_done)
     return f"Enriched {enriched_count} song(s)."
 
 
@@ -227,29 +243,59 @@ def _do_classify(max_playlists: int) -> str:
         fixed_categories = list(existing.keys())
 
     total = len(songs)
-    _update_progress(f"Classifying: 0/{total} songs", 0.0)
+    total_batches = (total + classifier.BATCH_SIZE - 1) // classifier.BATCH_SIZE
+    # Reserve progress space for refinement step (+1)
+    steps = total_batches + (1 if fixed_categories is None and total_batches > 1 else 0)
+    _update_progress(f"Rough classification: 0/{total_batches} batches", 0.0)
     client = classifier.get_client()
-
-    def on_progress(batch: int, total_batches: int, size: int) -> None:
-        _check_cancel()
-
+    batches_done = 0
     classified_songs: set[str] = set()
+    batch_status: dict[int, str] = {}
 
-    def on_batch_done(result: classifier.ClassificationResult) -> None:
+    def _batch_text() -> str:
+        if total_batches <= 1:
+            return ""
+        parts = []
+        for b in sorted(batch_status):
+            label = f"Batch {b}/{total_batches}"
+            parts.append(f"{label} \u2713" if batch_status[b] == "done" else label)
+        return "\n" + " \u00b7 ".join(parts)
+
+    def on_batch_start(batch_num: int, total: int, size: int) -> None:
+        _check_cancel()
+        batch_status[batch_num] = "processing"
+        _update_progress(
+            f"Rough classification: {batches_done}/{total_batches} batches{_batch_text()}",
+            batches_done / steps if steps else 0,
+        )
+
+    def on_batch_done(batch_num: int, result: classifier.ClassificationResult) -> None:
+        nonlocal batches_done
+        _check_cancel()
+        batches_done += 1
+        batch_status[batch_num] = "done"
+        _update_progress(
+            f"Rough classification: {batches_done}/{total_batches} batches{_batch_text()}",
+            batches_done / steps if steps else 0,
+        )
+
+    def on_refine_start() -> None:
+        _check_cancel()
+        _update_progress("Refining categories...", total_batches / steps if steps else 0.9)
+
+    def on_refine_done(result: classifier.ClassificationResult) -> None:
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")
             classified_songs.update(cat.song_ids)
-        _update_progress(
-            f"Classifying: {len(classified_songs)}/{total} songs",
-            min(len(classified_songs) / total, 1.0),
-        )
-        _check_cancel()
+        _update_progress("Classification complete", 1.0)
 
     result = classifier.classify_songs(
         client,
         songs,
-        on_progress=on_progress,
+        on_batch_start=on_batch_start,
         on_batch_done=on_batch_done,
+        on_refine_start=on_refine_start,
+        on_refine_done=on_refine_done,
         max_playlists=max_playlists,
         fixed_categories=fixed_categories,
     )

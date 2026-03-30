@@ -144,24 +144,53 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
         fixed_categories = list(existing.keys())
         console.print(f"Classifying into {len(fixed_categories)} existing playlist(s).")
 
-    console.print(f"Classifying {len(songs)} song(s) with Claude...")
+    total_batches = (len(songs) + classifier.BATCH_SIZE - 1) // classifier.BATCH_SIZE
+    console.print(
+        f"Classifying {len(songs)} song(s) in {total_batches} batch(es) "
+        f"with {min(classifier.MAX_WORKERS, total_batches)} worker(s)..."
+    )
     client = classifier.get_client()
     classified_songs: set[str] = set()
 
     with _make_progress() as progress:
-        task = progress.add_task("Classifying songs", total=len(songs))
+        overall = progress.add_task("Rough classification", total=len(songs))
+        batch_tasks: dict[int, int] = {}
+        refine_task: int | None = None
 
-        def on_progress(batch: int, total: int, size: int) -> None:
-            progress.advance(task, size)
+        def on_batch_start(batch_num: int, total: int, size: int) -> None:
+            batch_tasks[batch_num] = progress.add_task(
+                f"  Batch {batch_num}/{total}", total=size, visible=True,
+            )
 
-        def on_batch_done(result: classifier.ClassificationResult) -> None:
+        def on_batch_done(batch_num: int, result: classifier.ClassificationResult) -> None:
+            count = sum(len(c.song_ids) for c in result.categories)
+            if batch_num in batch_tasks:
+                progress.update(batch_tasks[batch_num], completed=count)
+            progress.advance(overall, count)
+
+        def on_refine_start() -> None:
+            nonlocal refine_task
+            # Hide batch rows
+            for tid in batch_tasks.values():
+                progress.update(tid, visible=False)
+            progress.update(overall, visible=False)
+            refine_task = progress.add_task("Refining categories...", total=None)
+
+        def on_refine_done(result: classifier.ClassificationResult) -> None:
+            if refine_task is not None:
+                progress.update(refine_task, total=1, completed=1)
             for cat in result.categories:
                 db.mark_classified(cat.song_ids, cat.name, playlist_id="")
                 classified_songs.update(cat.song_ids)
 
         result = classifier.classify_songs(
-            client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
-            max_playlists=max_playlists, fixed_categories=fixed_categories,
+            client, songs,
+            on_batch_start=on_batch_start,
+            on_batch_done=on_batch_done,
+            on_refine_start=on_refine_start,
+            on_refine_done=on_refine_done,
+            max_playlists=max_playlists,
+            fixed_categories=fixed_categories,
         )
 
     console.print("Categories:")

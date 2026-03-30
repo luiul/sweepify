@@ -8,6 +8,7 @@ from sweepify.config import ANTHROPIC_API_KEY, AWS_REGION, LLM_PROVIDER
 from sweepify.models import Song
 
 BATCH_SIZE = 100
+MAX_WORKERS = 4
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a music curator. Given a list of songs with metadata (name, artist, album, genres), \
 group them into playlists. Create between 5 and {max_playlists} categories based on genre, mood, energy, \
@@ -67,6 +68,33 @@ Important:
 _FIXED_CATEGORIES_PROMPT_PREFIX = """Use ONLY these categories:
 
 """
+
+_REFINEMENT_SYSTEM_PROMPT_TEMPLATE = """You are a music curator reviewing rough playlist groupings produced by \
+an initial automated pass. Multiple batches of songs were independently classified, so there are \
+overlapping, redundant, or inconsistent categories (e.g. "Late Night Vibes" and "Midnight Drive" \
+may describe the same playlist concept).
+
+Your job: merge, rename, and consolidate them into {max_playlists} or fewer final playlists. \
+Each song can appear in up to 4 playlists if it genuinely fits.
+
+Return a JSON object with this exact structure:
+{{
+  "categories": [
+    {{
+      "name": "Final Playlist Name",
+      "description": "Brief description of what ties these songs together",
+      "song_ids": ["spotify_id_1", "spotify_id_2"]
+    }}
+  ]
+}}
+
+Important:
+- Every song_id from the input must appear in at least one final category
+- A song may appear in up to 4 categories if it genuinely fits multiple playlists
+- Merge categories that overlap in theme, mood, or genre — prefer fewer well-populated playlists
+- Choose evocative, descriptive names (not generic like "Category 1")
+- Each final category should have at least 5 songs
+- Return ONLY the JSON object, no other text"""
 
 
 class Category(BaseModel):
@@ -139,39 +167,86 @@ def classify_songs(
     client: anthropic.Anthropic,
     songs: list[Song],
     on_progress: typing.Callable[[int, int, int], None] | None = None,
-    on_batch_done: typing.Callable[[ClassificationResult], None] | None = None,
+    on_batch_start: typing.Callable[[int, int, int], None] | None = None,
+    on_batch_done: typing.Callable[[int, ClassificationResult], None] | None = None,
+    on_refine_start: typing.Callable[[], None] | None = None,
+    on_refine_done: typing.Callable[[ClassificationResult], None] | None = None,
     max_playlists: int = DEFAULT_MAX_PLAYLISTS,
     fixed_categories: list[str] | None = None,
+    max_workers: int = MAX_WORKERS,
 ) -> ClassificationResult:
-    """Classify songs into categories using Claude. Handles batching for large collections.
+    """Classify songs into categories using Claude with parallel batching.
 
-    on_batch_done is called after each batch with that batch's results,
-    allowing the caller to persist progress incrementally.
+    Two-step process for multi-batch collections:
+    1. Rough classification: batches processed in parallel, each producing independent categories
+    2. Refinement: single API call merges/consolidates rough categories into final set
 
-    If fixed_categories is provided, songs are assigned only to those categories
-    (no new categories are created).
+    Single-batch collections skip step 2. Fixed-categories mode parallelizes but skips refinement.
     """
-    all_categories: list[Category] = []
-    existing: list[Category] | None = None
-    if fixed_categories is not None:
-        existing = [Category(name=c, description="", song_ids=[]) for c in fixed_categories]
-    total_batches = (len(songs) + BATCH_SIZE - 1) // BATCH_SIZE
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for batch_num, i in enumerate(range(0, len(songs), BATCH_SIZE), 1):
-        batch = songs[i : i + BATCH_SIZE]
-        if on_progress:
+    batches = [songs[i : i + BATCH_SIZE] for i in range(0, len(songs), BATCH_SIZE)]
+    total_batches = len(batches)
+    fixed_only = fixed_categories is not None
+
+    existing: list[Category] | None = None
+    if fixed_only:
+        existing = [Category(name=c, description="", song_ids=[]) for c in fixed_categories]
+
+    if on_progress:
+        for batch_num, batch in enumerate(batches, 1):
             on_progress(batch_num, total_batches, len(batch))
+
+    # Single batch: no threading, no refinement
+    if total_batches == 1:
+        if on_batch_start:
+            on_batch_start(1, 1, len(batches[0]))
         result = _classify_batch(
-            client, batch, existing,
-            max_playlists=max_playlists,
-            fixed_only=fixed_categories is not None,
+            client, batches[0], existing,
+            max_playlists=max_playlists, fixed_only=fixed_only,
         )
         if on_batch_done:
-            on_batch_done(result)
-        all_categories = _merge_categories(all_categories, result.categories)
-        existing = all_categories
+            on_batch_done(1, result)
+        if on_refine_done:
+            on_refine_done(result)
+        return result
 
-    return ClassificationResult(categories=all_categories)
+    # Step 1: Parallel rough classification
+    all_categories: list[Category] = []
+    lock = threading.Lock()
+
+    def _process_batch(batch_num: int, batch: list[Song]) -> tuple[int, ClassificationResult]:
+        if on_batch_start:
+            on_batch_start(batch_num, total_batches, len(batch))
+        return batch_num, _classify_batch(
+            client, batch, existing,
+            max_playlists=max_playlists, fixed_only=fixed_only,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, total_batches)) as pool:
+        futures = {pool.submit(_process_batch, i + 1, batch): i for i, batch in enumerate(batches)}
+        for future in as_completed(futures):
+            batch_num, result = future.result()
+            with lock:
+                all_categories = _merge_categories(all_categories, result.categories)
+            if on_batch_done:
+                on_batch_done(batch_num, result)
+
+    # Fixed categories: no refinement needed, merge is sufficient
+    if fixed_only:
+        merged = ClassificationResult(categories=all_categories)
+        if on_refine_done:
+            on_refine_done(merged)
+        return merged
+
+    # Step 2: Refinement
+    if on_refine_start:
+        on_refine_start()
+    refined = _refine_categories(client, all_categories, max_playlists=max_playlists)
+    if on_refine_done:
+        on_refine_done(refined)
+    return refined
 
 
 def _classify_batch(
@@ -211,6 +286,51 @@ def _classify_batch(
             text = text.rstrip()[:-3]
 
     # Fallback: find the first { ... } JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start : end + 1]
+
+    parsed = json.loads(text)
+    return ClassificationResult.model_validate(parsed)
+
+
+def _refine_categories(
+    client: anthropic.Anthropic,
+    rough_categories: list[Category],
+    max_playlists: int = DEFAULT_MAX_PLAYLISTS,
+) -> ClassificationResult:
+    """Consolidate rough categories from parallel batches into a final coherent set."""
+    cat_lines = []
+    for cat in rough_categories:
+        cat_lines.append(
+            f"- {cat.name} ({len(cat.song_ids)} songs): {cat.description}\n"
+            f"  song_ids: {json.dumps(cat.song_ids)}"
+        )
+    user_prompt = (
+        f"Consolidate these {len(rough_categories)} rough categories into "
+        f"{max_playlists} or fewer final playlists:\n\n" + "\n".join(cat_lines)
+    )
+
+    response = client.messages.create(
+        model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
+        max_tokens=16384,
+        system=_REFINEMENT_SYSTEM_PROMPT_TEMPLATE.format(max_playlists=max_playlists),
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "Claude refinement response was truncated. "
+            "Try reducing the number of songs or max_playlists."
+        )
+
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1:
