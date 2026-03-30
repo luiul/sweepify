@@ -75,25 +75,25 @@ overlapping, redundant, or inconsistent categories (e.g. "Late Night Vibes" and 
 may describe the same playlist concept).
 
 Your job: merge, rename, and consolidate them into {max_playlists} or fewer final playlists. \
-Each song can appear in up to 4 playlists if it genuinely fits.
+You do NOT need to reassign individual songs — just tell me which rough categories to merge \
+and what the final name should be.
 
 Return a JSON object with this exact structure:
 {{
-  "categories": [
+  "mapping": [
     {{
-      "name": "Final Playlist Name",
+      "final_name": "Final Playlist Name",
       "description": "Brief description of what ties these songs together",
-      "song_ids": ["spotify_id_1", "spotify_id_2"]
+      "source_categories": ["Rough Category A", "Rough Category B"]
     }}
   ]
 }}
 
 Important:
-- Every song_id from the input must appear in at least one final category
-- A song may appear in up to 4 categories if it genuinely fits multiple playlists
+- Every rough category from the input must appear in exactly one source_categories list
 - Merge categories that overlap in theme, mood, or genre — prefer fewer well-populated playlists
 - Choose evocative, descriptive names (not generic like "Category 1")
-- Each final category should have at least 5 songs
+- Each final playlist should have at least 5 songs (consider the song counts shown)
 - Return ONLY the JSON object, no other text"""
 
 
@@ -105,6 +105,16 @@ class Category(BaseModel):
 
 class ClassificationResult(BaseModel):
     categories: list[Category]
+
+
+class _RefinementMapping(BaseModel):
+    final_name: str
+    description: str
+    source_categories: list[str]
+
+
+class _RefinementResult(BaseModel):
+    mapping: list[_RefinementMapping]
 
 
 BEDROCK_MODEL = "eu.anthropic.claude-sonnet-4-20250514-v1:0"
@@ -300,13 +310,15 @@ def _refine_categories(
     rough_categories: list[Category],
     max_playlists: int = DEFAULT_MAX_PLAYLISTS,
 ) -> ClassificationResult:
-    """Consolidate rough categories from parallel batches into a final coherent set."""
+    """Consolidate rough categories from parallel batches into a final coherent set.
+
+    Instead of asking Claude to reassign every song_id (slow for large libraries),
+    we ask for a category mapping (which rough categories merge into which final names)
+    and do the song_id reassignment locally.
+    """
     cat_lines = []
     for cat in rough_categories:
-        cat_lines.append(
-            f"- {cat.name} ({len(cat.song_ids)} songs): {cat.description}\n"
-            f"  song_ids: {json.dumps(cat.song_ids)}"
-        )
+        cat_lines.append(f"- {cat.name} ({len(cat.song_ids)} songs): {cat.description}")
     user_prompt = (
         f"Consolidate these {len(rough_categories)} rough categories into "
         f"{max_playlists} or fewer final playlists:\n\n" + "\n".join(cat_lines)
@@ -314,7 +326,7 @@ def _refine_categories(
 
     response = client.messages.create(
         model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
-        max_tokens=16384,
+        max_tokens=4096,
         system=_REFINEMENT_SYSTEM_PROMPT_TEMPLATE.format(max_playlists=max_playlists),
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -337,7 +349,26 @@ def _refine_categories(
         text = text[start : end + 1]
 
     parsed = json.loads(text)
-    return ClassificationResult.model_validate(parsed)
+    mapping = _RefinementResult.model_validate(parsed)
+
+    # Build lookup: rough category name -> Category object
+    rough_by_name = {c.name: c for c in rough_categories}
+
+    # Apply mapping: merge song_ids from source categories into final categories
+    final_categories: list[Category] = []
+    for entry in mapping.mapping:
+        merged_ids: list[str] = []
+        for source in entry.source_categories:
+            if source in rough_by_name:
+                merged_ids.extend(rough_by_name[source].song_ids)
+        if merged_ids:
+            final_categories.append(Category(
+                name=entry.final_name,
+                description=entry.description,
+                song_ids=merged_ids,
+            ))
+
+    return ClassificationResult(categories=final_categories)
 
 
 _GENRE_SYSTEM_PROMPT = """You are a music curator. Given a list of songs that match certain genres, \

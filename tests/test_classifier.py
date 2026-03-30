@@ -28,6 +28,17 @@ def _mock_claude_response(categories: list[dict]) -> MagicMock:
     return response
 
 
+def _mock_refinement_response(mapping: list[dict]) -> MagicMock:
+    """Create a mock refinement mapping response."""
+    result = {"mapping": mapping}
+    content_block = MagicMock()
+    content_block.text = json.dumps(result)
+    response = MagicMock()
+    response.content = [content_block]
+    response.stop_reason = "end_turn"
+    return response
+
+
 def test_classify_songs_single_batch():
     """Single batch: no refinement, no threading."""
     client = MagicMock()
@@ -180,11 +191,11 @@ def test_classify_songs_parallel_with_refinement():
         {"name": "Rock B", "description": "Rock batch 2", "song_ids": [f"t{i}" for i in range(100, 130)]},
         {"name": "Jazz", "description": "Jazz batch 2", "song_ids": [f"t{i}" for i in range(130, 150)]},
     ])
-    # Refinement response (consolidates all)
-    refine_response = _mock_claude_response([
-        {"name": "Rock", "description": "All rock", "song_ids": [f"t{i}" for i in range(50)] + [f"t{i}" for i in range(100, 130)]},
-        {"name": "Chill", "description": "Chill vibes", "song_ids": [f"t{i}" for i in range(50, 100)]},
-        {"name": "Jazz", "description": "Jazz tunes", "song_ids": [f"t{i}" for i in range(130, 150)]},
+    # Refinement response (mapping, not song_ids)
+    refine_response = _mock_refinement_response([
+        {"final_name": "Rock", "description": "All rock", "source_categories": ["Rock A", "Rock B"]},
+        {"final_name": "Chill", "description": "Chill vibes", "source_categories": ["Chill A"]},
+        {"final_name": "Jazz", "description": "Jazz tunes", "source_categories": ["Jazz"]},
     ])
 
     client = MagicMock()
@@ -247,10 +258,10 @@ def test_fixed_categories_parallel_no_refinement():
 
 
 def test_refine_categories():
-    """Unit test for the refinement function."""
-    refined_response = _mock_claude_response([
-        {"name": "Rock Anthems", "description": "All rock", "song_ids": ["t1", "t2", "t3"]},
-        {"name": "Chill", "description": "Relaxing", "song_ids": ["t4", "t5"]},
+    """Unit test for the refinement function — uses mapping, not song_ids."""
+    refined_response = _mock_refinement_response([
+        {"final_name": "Rock Anthems", "description": "All rock", "source_categories": ["Rock A", "Rock B"]},
+        {"final_name": "Chill", "description": "Relaxing", "source_categories": ["Chill Vibes"]},
     ])
 
     client = MagicMock()
@@ -265,5 +276,7 @@ def test_refine_categories():
     result = _refine_categories(client, rough, max_playlists=5)
 
     assert len(result.categories) == 2
-    assert result.categories[0].name == "Rock Anthems"
-    assert result.categories[0].song_ids == ["t1", "t2", "t3"]
+    rock = next(c for c in result.categories if c.name == "Rock Anthems")
+    assert rock.song_ids == ["t1", "t2", "t3"]  # merged from Rock A + Rock B
+    chill = next(c for c in result.categories if c.name == "Chill")
+    assert chill.song_ids == ["t4", "t5"]
