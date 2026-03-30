@@ -46,7 +46,7 @@ if cat_stats:
             icon = "\u2705" if cs["playlist"] else "\u23f3"
             st.markdown(f"{icon} **{cs['category']}** — {cs['songs']} songs")
 
-view = st.sidebar.radio("View", ["Actions", "Songs", "Genres", "Enrichment", "Playlists", "Playlist Builder", "SQL"])
+view = st.sidebar.radio("View", ["Actions", "Songs", "Categories", "Genres", "Enrichment", "Playlists", "Playlist Builder", "SQL"])
 
 
 # --- Action state (cached at server level so it survives page refreshes) ---
@@ -607,6 +607,116 @@ elif view == "Songs":
 
         st.dataframe(filtered, use_container_width=True, hide_index=True)
         st.caption(f"Showing {len(filtered)} of {len(df)} songs")
+
+elif view == "Categories":
+    st.header("Category Breakdown")
+    df = load_table("songs")
+
+    if df.empty:
+        st.info("No songs yet. Run `sweepify fetch` to get started.")
+    else:
+        classified_df = df[df["classified"] == 1]
+        if classified_df.empty:
+            st.info("No classified songs yet. Run `sweepify classify` to get started.")
+        else:
+            # Parse categories JSON into rows
+            def _parse_cat_list(val):
+                if not val:
+                    return []
+                try:
+                    return json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    return []
+
+            classified_df = classified_df.copy()
+            classified_df["cat_list"] = classified_df["categories"].apply(_parse_cat_list)
+            exploded = classified_df.explode("cat_list").dropna(subset=["cat_list"])
+            cat_counts = exploded["cat_list"].value_counts().reset_index()
+            cat_counts.columns = ["category", "songs"]
+
+            # Summary metrics
+            m_cols = st.columns(4)
+            m_cols[0].metric("Categories", len(cat_counts))
+            m_cols[1].metric("Classified Songs", len(classified_df))
+            m_cols[2].metric("Avg Songs/Category", round(cat_counts["songs"].mean(), 1) if not cat_counts.empty else 0)
+            multi = classified_df[classified_df["cat_list"].apply(len) > 1]
+            m_cols[3].metric("Multi-Category Songs", len(multi))
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                # Bar chart: songs per category
+                st.subheader("Songs per Category")
+                fig_bar = px.bar(
+                    cat_counts,
+                    x="songs",
+                    y="category",
+                    orientation="h",
+                    color="songs",
+                    color_continuous_scale=["#1A1E2E", "#1DB954"],
+                )
+                fig_bar.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    yaxis={"categoryorder": "total ascending"},
+                    coloraxis_showscale=False,
+                    margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                    height=max(400, len(cat_counts) * 35),
+                )
+                st.plotly_chart(fig_bar, use_container_width=True, theme="streamlit")
+
+            with col2:
+                # Pie chart: category distribution
+                st.subheader("Category Distribution")
+                fig_pie = px.pie(
+                    cat_counts,
+                    names="category",
+                    values="songs",
+                    color_discrete_sequence=px.colors.sequential.Emrld,
+                )
+                fig_pie.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                    height=max(400, len(cat_counts) * 35),
+                )
+                st.plotly_chart(fig_pie, use_container_width=True, theme="streamlit")
+
+            # Mood breakdown per category (if enriched)
+            enriched_exploded = exploded[exploded["enriched"] == 1]
+            if not enriched_exploded.empty and "mood" in enriched_exploded.columns:
+                st.subheader("Mood by Category")
+                mood_cat = enriched_exploded.groupby(["cat_list", "mood"]).size().reset_index(name="count")
+                mood_cat.columns = ["category", "mood", "count"]
+                fig_mood = px.bar(
+                    mood_cat,
+                    x="count",
+                    y="category",
+                    color="mood",
+                    orientation="h",
+                    barmode="stack",
+                )
+                fig_mood.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    yaxis={"categoryorder": "total ascending"},
+                    margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                    height=max(400, len(cat_counts) * 35),
+                    legend={"orientation": "h", "y": -0.15},
+                )
+                st.plotly_chart(fig_mood, use_container_width=True, theme="streamlit")
+
+            # Browse by category
+            st.subheader("Browse by Category")
+            selected_cat = st.selectbox(
+                "Select a category",
+                cat_counts["category"].tolist(),
+            )
+            if selected_cat:
+                cat_songs = exploded[exploded["cat_list"] == selected_cat][
+                    ["name", "artist", "album", "mood", "vibe", "bpm"]
+                ]
+                st.dataframe(cat_songs, use_container_width=True, hide_index=True)
+                st.caption(f"{len(cat_songs)} songs in '{selected_cat}'")
 
 elif view == "Genres":
     st.header("Genre Breakdown")
