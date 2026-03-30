@@ -79,36 +79,41 @@ def enrich_songs(
     client: typing.Any,
     songs: list[Song],
     on_progress: typing.Callable[[int, int, int], None] | None = None,
-    on_batch_done: typing.Callable[[EnrichmentResult], None] | None = None,
+    on_batch_start: typing.Callable[[int, int, int], None] | None = None,
+    on_batch_done: typing.Callable[[int, EnrichmentResult], None] | None = None,
     max_workers: int = MAX_WORKERS,
 ) -> EnrichmentResult:
     """Enrich songs with AI-generated metadata. Handles batching for large collections.
 
     Batches are processed concurrently (up to max_workers at a time) for speed.
-    on_batch_done is called as each batch completes, allowing incremental persistence.
+    on_batch_start(batch_num, total_batches, size) is called when a batch begins processing.
+    on_batch_done(batch_num, result) is called as each batch completes.
     """
+    import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     batches = [songs[i : i + BATCH_SIZE] for i in range(0, len(songs), BATCH_SIZE)]
     total_batches = len(batches)
     all_enrichments: list[SongEnrichment] = []
-    lock = __import__("threading").Lock()
+    lock = threading.Lock()
 
     if on_progress:
         for batch_num, batch in enumerate(batches, 1):
             on_progress(batch_num, total_batches, len(batch))
 
-    def _process_batch(batch: list[Song]) -> EnrichmentResult:
-        return _enrich_batch(client, batch)
+    def _process_batch(batch_num: int, batch: list[Song]) -> tuple[int, EnrichmentResult]:
+        if on_batch_start:
+            on_batch_start(batch_num, total_batches, len(batch))
+        return batch_num, _enrich_batch(client, batch)
 
     with ThreadPoolExecutor(max_workers=min(max_workers, total_batches)) as pool:
-        futures = {pool.submit(_process_batch, batch): i for i, batch in enumerate(batches)}
+        futures = {pool.submit(_process_batch, i + 1, batch): i for i, batch in enumerate(batches)}
         for future in as_completed(futures):
-            result = future.result()
+            batch_num, result = future.result()
             with lock:
                 all_enrichments.extend(result.songs)
             if on_batch_done:
-                on_batch_done(result)
+                on_batch_done(batch_num, result)
 
     return EnrichmentResult(songs=all_enrichments)
 

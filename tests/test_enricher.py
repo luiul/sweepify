@@ -107,7 +107,7 @@ def test_enrich_songs_callbacks():
     def on_progress(batch, total, size):
         progress_calls.append((batch, total, size))
 
-    def on_batch_done(result):
+    def on_batch_done(batch_num, result):
         batch_done_calls.append(result)
 
     songs = [_make_song("t1")]

@@ -189,7 +189,7 @@ def _do_enrich(force: bool) -> str:
     client = get_client()
     enriched_count = 0
 
-    def on_batch_done(result: enricher.EnrichmentResult) -> None:
+    def on_batch_done(batch_num: int, result: enricher.EnrichmentResult) -> None:
         nonlocal enriched_count
         _check_cancel()
         db.mark_enriched(
