@@ -15,7 +15,12 @@ st.set_page_config(page_title="sweepify", page_icon="🧹", layout="wide")
 init_db()
 
 
+_ALLOWED_TABLES = {"songs", "playlists"}
+
+
 def load_table(table: str) -> pd.DataFrame:
+    if table not in _ALLOWED_TABLES:
+        raise ValueError(f"Unknown table: {table}")
     with get_connection() as conn:
         return pd.read_sql_query(f"SELECT * FROM {table}", conn)  # noqa: S608
 
@@ -191,7 +196,7 @@ def _do_enrich(force: bool) -> str:
     enriched_count = 0
 
     def on_progress(batch: int, total_batches: int, size: int) -> None:
-        pass
+        _check_cancel()
 
     def on_batch_done(result: enricher.EnrichmentResult) -> None:
         nonlocal enriched_count
@@ -236,7 +241,7 @@ def _do_classify(max_playlists: int) -> str:
     classified_count = 0
 
     def on_progress(batch: int, total_batches: int, size: int) -> None:
-        pass
+        _check_cancel()
 
     def on_batch_done(result: classifier.ClassificationResult) -> None:
         nonlocal classified_count
@@ -535,11 +540,12 @@ elif view == "Genres":
             genre_counts = exploded["genre_list"].value_counts()
 
             # Top genres bar chart
+            max_genres = min(50, len(genre_counts))
             top_n = st.slider(
                 "Top N genres",
-                min_value=5,
-                max_value=min(50, len(genre_counts)),
-                value=min(20, len(genre_counts)),
+                min_value=min(5, max_genres),
+                max_value=max_genres,
+                value=min(20, max_genres),
             )
             top_genres = genre_counts.head(top_n).reset_index()
             top_genres.columns = ["genre", "songs"]
@@ -767,7 +773,9 @@ elif view == "SQL":
     if st.button("Run"):
         try:
             with get_connection() as conn:
+                conn.execute("BEGIN")
                 result = pd.read_sql_query(query, conn)
+                conn.execute("ROLLBACK")
             st.dataframe(result, use_container_width=True, hide_index=True)
             st.caption(f"{len(result)} row(s)")
         except Exception as e:

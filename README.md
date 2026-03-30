@@ -52,7 +52,7 @@ ANTHROPIC_API_KEY=               # only if using anthropic provider
 uv run sweepify run
 ```
 
-This runs all three steps in sequence: fetch, classify, and create playlists.
+This runs all four steps in sequence: fetch, enrich, classify, and create playlists.
 
 ### Target a specific playlist
 
@@ -64,6 +64,7 @@ uv run sweepify run -p "My Playlist"
 
 ```bash
 uv run sweepify fetch      # Fetch liked songs from Spotify
+uv run sweepify enrich     # Add AI metadata (mood, BPM, vibe, related artists)
 uv run sweepify classify   # Classify songs using Claude
 uv run sweepify create     # Create Spotify playlists
 uv run sweepify status     # Show song and classification counts
@@ -110,14 +111,16 @@ On your first run, a browser window will open for Spotify authorization. Grant t
 | `SPOTIPY_REDIRECT_URI`     | `http://127.0.0.1:8888/callback` | OAuth redirect URI                                |
 | `SWEEPIFY_LLM_PROVIDER`    | `bedrock`                        | LLM provider: `bedrock` or `anthropic`            |
 | `ANTHROPIC_API_KEY`        |                                  | Anthropic API key (only for `anthropic` provider) |
+| `AWS_REGION`               | `eu-west-1`                      | AWS region (only for `bedrock` provider)          |
 | `SWEEPIFY_PLAYLIST_PREFIX` | `sweepify:`                      | Prefix for created playlist names                 |
 | `SWEEPIFY_DB_DIR`          | `~/.sweepify`                    | Directory for the local SQLite database           |
 
 ## How it works
 
 1. **Fetch** — Retrieves all Liked Songs (or a specific playlist) via the Spotify API with pagination, enriches them with artist genre data, and stores everything in a local SQLite database.
-2. **Classify** — Sends unclassified songs (in batches of ~100) to Claude, which groups them into 5-15 categories based on genre, mood, and thematic coherence. Categories stay consistent across batches. Progress is saved after each batch so you can resume if interrupted.
-3. **Create** — Creates private Spotify playlists for each category and adds the songs. Re-running is safe: existing playlists are reused, and already-classified songs are skipped.
+2. **Enrich** — Sends unenriched songs (in batches of ~50) to Claude to generate metadata: mood, BPM estimate, vibe phrase, and related artists. Progress is saved after each batch.
+3. **Classify** — Sends unclassified songs (in batches of ~100) to Claude, which groups them into 5-15 categories based on genre, mood, and thematic coherence. Categories stay consistent across batches. Progress is saved after each batch so you can resume if interrupted.
+4. **Create** — Creates private Spotify playlists for each category and adds the songs. Re-running is safe: existing playlists are reused, and already-classified songs are skipped.
 
 ## Development
 
