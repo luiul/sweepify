@@ -1,4 +1,5 @@
 import json
+import re
 import typing
 
 import anthropic
@@ -139,6 +140,27 @@ def get_client() -> anthropic.Anthropic | anthropic.AnthropicBedrock:
             aws_session_token=frozen.token,
         )
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def _extract_json(text: str) -> dict:
+    """Extract and parse JSON from a Claude response, handling code fences and minor errors."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        text = text[start : end + 1]
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Fix trailing commas before ] or }
+        cleaned = re.sub(r",\s*([}\]])", r"\1", text)
+        return json.loads(cleaned)
 
 
 def _format_songs_for_prompt(songs: list[Song]) -> str:
@@ -284,22 +306,7 @@ def _classify_batch(
             "Try reducing BATCH_SIZE."
         )
 
-    text = response.content[0].text
-    # Extract JSON from response, stripping markdown code fences if present
-    text = text.strip()
-    if text.startswith("```"):
-        # Remove opening fence (```json, ```, etc.) and closing fence
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-
-    # Fallback: find the first { ... } JSON object
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        text = text[start : end + 1]
-
-    parsed = json.loads(text)
+    parsed = _extract_json(response.content[0].text)
     return ClassificationResult.model_validate(parsed)
 
 
@@ -322,32 +329,30 @@ def _refine_categories(
         f"{max_playlists} or fewer final playlists:\n\n" + "\n".join(cat_lines)
     )
 
-    response = client.messages.create(
-        model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
-        max_tokens=4096,
-        system=_REFINEMENT_SYSTEM_PROMPT_TEMPLATE.format(max_playlists=max_playlists),
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    if response.stop_reason == "max_tokens":
-        raise RuntimeError(
-            "Claude refinement response was truncated. "
-            "Try reducing the number of songs or max_playlists."
+    last_error = None
+    for attempt in range(2):
+        response = client.messages.create(
+            model=BEDROCK_MODEL if LLM_PROVIDER == "bedrock" else DIRECT_MODEL,
+            max_tokens=4096,
+            system=_REFINEMENT_SYSTEM_PROMPT_TEMPLATE.format(max_playlists=max_playlists),
+            messages=[{"role": "user", "content": user_prompt}],
         )
 
-    text = response.content[0].text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError(
+                "Claude refinement response was truncated. "
+                "Try reducing the number of songs or max_playlists."
+            )
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        text = text[start : end + 1]
-
-    parsed = json.loads(text)
-    mapping = _RefinementResult.model_validate(parsed)
+        try:
+            parsed = _extract_json(response.content[0].text)
+            mapping = _RefinementResult.model_validate(parsed)
+            break
+        except (json.JSONDecodeError, Exception) as e:
+            last_error = e
+            if attempt == 0:
+                continue
+            raise last_error from None
 
     # Build lookup: rough category name -> Category object
     rough_by_name = {c.name: c for c in rough_categories}
@@ -430,19 +435,7 @@ def classify_by_genre(
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    text = response.content[0].text
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1:
-        text = text[start : end + 1]
-
-    parsed = json.loads(text)
+    parsed = _extract_json(response.content[0].text)
     return ClassificationResult.model_validate(parsed)
 
 
