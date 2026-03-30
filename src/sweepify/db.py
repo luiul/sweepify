@@ -30,11 +30,20 @@ def _ensure_columns(conn: sqlite3.Connection, model: type, table_name: str) -> N
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {col_type}{default_clause}")
 
 
+def _drop_removed_columns(conn: sqlite3.Connection, model: type, table_name: str) -> None:
+    """Drop columns that exist in the table but are no longer in the model."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    model_fields = set(model.model_fields)
+    for col in existing - model_fields:
+        conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {col}")
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(generate_create_table(Song, "songs"))
         conn.execute(generate_create_table(Playlist, "playlists"))
         _ensure_columns(conn, Song, "songs")
+        _drop_removed_columns(conn, Song, "songs")
 
 
 # --- Songs ---
