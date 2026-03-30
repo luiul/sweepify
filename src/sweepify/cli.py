@@ -167,6 +167,10 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
             if batch_num in batch_tasks:
                 progress.update(batch_tasks[batch_num], completed=count)
             progress.advance(overall, count)
+            # Persist rough results so progress is saved if interrupted
+            for cat in result.categories:
+                db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+                classified_songs.update(cat.song_ids)
 
         def on_refine_start() -> None:
             nonlocal refine_task
@@ -179,6 +183,9 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
         def on_refine_done(result: classifier.ClassificationResult) -> None:
             if refine_task is not None:
                 progress.update(refine_task, total=1, completed=1)
+            # Overwrite rough classifications with refined ones
+            db.reset_classifications()
+            classified_songs.clear()
             for cat in result.categories:
                 db.mark_classified(cat.song_ids, cat.name, playlist_id="")
                 classified_songs.update(cat.song_ids)

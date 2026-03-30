@@ -274,6 +274,10 @@ def _do_classify(max_playlists: int) -> str:
         _check_cancel()
         batches_done += 1
         batch_status[batch_num] = "done"
+        # Persist rough results so progress is saved if interrupted
+        for cat in result.categories:
+            db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+            classified_songs.update(cat.song_ids)
         _update_progress(
             f"Rough classification: {batches_done}/{total_batches} batches{_batch_text()}",
             batches_done / steps if steps else 0,
@@ -284,6 +288,9 @@ def _do_classify(max_playlists: int) -> str:
         _update_progress("Refining categories...", total_batches / steps if steps else 0.9)
 
     def on_refine_done(result: classifier.ClassificationResult) -> None:
+        # Overwrite rough classifications with refined ones
+        db.reset_classifications()
+        classified_songs.clear()
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")
             classified_songs.update(cat.song_ids)
