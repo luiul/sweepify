@@ -118,9 +118,22 @@ On your first run, a browser window will open for Spotify authorization. Grant t
 ## How it works
 
 1. **Fetch** — Retrieves all Liked Songs (or a specific playlist) via the Spotify API with pagination, enriches them with artist genre data, and stores everything in a local SQLite database.
-2. **Enrich** — Sends unenriched songs (in batches of ~50) to Claude to generate metadata: mood, BPM estimate, vibe phrase, and related artists. Progress is saved after each batch.
-3. **Classify** — Sends unclassified songs (in batches of ~100) to Claude, which groups them into 5-15 categories based on genre, mood, and thematic coherence. Categories stay consistent across batches. Progress is saved after each batch so you can resume if interrupted.
+2. **Enrich** — Sends unenriched songs (in parallel batches of ~50) to Claude to generate metadata: mood, BPM estimate, vibe phrase, and related artists. Up to 4 batches run concurrently. Progress is saved after each batch.
+3. **Classify** — Two-step parallel process (see below). Songs can appear in up to 4 playlists.
 4. **Create** — Creates private Spotify playlists for each category and adds the songs. Re-running is safe: existing playlists are reused, and already-classified songs are skipped.
+
+### Classification pipeline
+
+Classification uses a two-step approach to balance speed and quality:
+
+**Step 1 — Rough classification (parallel).** Songs are split into batches of ~100 and all batches are sent to Claude concurrently (up to 4 workers). Each batch independently produces its own categories, so overlapping or inconsistent names across batches are expected.
+
+**Step 2 — Refinement (single call).** All rough categories are collected and sent in one API call to Claude, which merges overlapping categories, picks final names, and reassigns every song to 5–N coherent playlists.
+
+Short-circuits:
+
+- **<=100 songs**: Single API call, no refinement needed.
+- **Fixed categories** (`-n 0`): Batches run in parallel but skip refinement since the category names are predetermined.
 
 ## Development
 
