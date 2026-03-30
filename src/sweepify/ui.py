@@ -35,7 +35,8 @@ st.sidebar.metric("Total songs", status["total"])
 cols = st.sidebar.columns(3)
 cols[0].metric("Enriched", status["enriched"])
 cols[1].metric("Classified", status["classified"])
-cols[2].metric("Unclassified", status["unclassified"])
+cols[2].metric("Refined", status["refined"])
+st.sidebar.metric("Unclassified", status["unclassified"])
 st.sidebar.metric("Categories", status["categories"])
 st.sidebar.metric("Playlists", status["playlists"])
 
@@ -323,6 +324,7 @@ def _do_refine(max_playlists: int) -> str:
     for cat in result.categories:
         db.mark_classified(cat.song_ids, cat.name, playlist_id="")
         classified_songs.update(cat.song_ids)
+    db.mark_refined(unique_ids)
 
     _update_progress("Refinement complete", 1.0)
     summary = ", ".join(f"{c.name} ({len(c.song_ids)})" for c in result.categories)
@@ -478,7 +480,20 @@ if view == "Actions":
         st.caption("Add AI metadata (mood, BPM, vibe)")
         enrich_force = st.checkbox("Re-enrich all", key="enrich_force")
         if st.button("Enrich", use_container_width=True, type="primary", disabled=_disabled):
-            _run_action("Enrich", _do_enrich, enrich_force)
+            if enrich_force and status["enriched"] > 0:
+                st.session_state["confirm_enrich_force"] = True
+            else:
+                _run_action("Enrich", _do_enrich, enrich_force)
+
+        if st.session_state.get("confirm_enrich_force"):
+            st.warning(f"Re-enrich {status['enriched']} song(s)?")
+            c1, c2 = st.columns(2)
+            if c1.button("Confirm", type="primary", key="confirm_enrich_btn", use_container_width=True):
+                st.session_state["confirm_enrich_force"] = False
+                _run_action("Enrich", _do_enrich, True)
+            if c2.button("Cancel", key="cancel_enrich", use_container_width=True):
+                st.session_state["confirm_enrich_force"] = False
+                st.rerun()
 
     with pipeline_cols[2]:
         st.markdown("**3. Classify**")
@@ -492,7 +507,22 @@ if view == "Actions":
         st.caption("Consolidate rough categories")
         refine_max = st.number_input("Max playlists", min_value=1, max_value=30, value=10, key="refine_max")
         if st.button("Refine", use_container_width=True, type="primary", disabled=_disabled):
-            _run_action("Refine", _do_refine, int(refine_max))
+            if status["refined"] > 0:
+                st.session_state["confirm_rerefine"] = True
+                st.session_state["confirm_rerefine_max"] = int(refine_max)
+            else:
+                _run_action("Refine", _do_refine, int(refine_max))
+
+        if st.session_state.get("confirm_rerefine"):
+            st.warning(f"{status['refined']} song(s) already refined. Re-refining will replace categories.")
+            c1, c2 = st.columns(2)
+            if c1.button("Confirm", type="primary", key="confirm_refine_btn", use_container_width=True):
+                max_val = st.session_state.pop("confirm_rerefine_max", 10)
+                st.session_state["confirm_rerefine"] = False
+                _run_action("Refine", _do_refine, max_val)
+            if c2.button("Cancel", key="cancel_refine", use_container_width=True):
+                st.session_state["confirm_rerefine"] = False
+                st.rerun()
 
     with pipeline_cols[4]:
         st.markdown("**5. Create**")
@@ -528,21 +558,46 @@ if view == "Actions":
         st.caption("Clear classifications (keeps songs)")
         reset_enrichment = st.checkbox("Also reset enrichment", key="reset_enrichment")
         if st.button("Reset", use_container_width=True, disabled=_disabled):
-            from sweepify import db as _db
+            st.session_state["confirm_reset"] = True
+            st.session_state["confirm_reset_enrichment"] = reset_enrichment
 
-            count = _db.reset_classifications()
-            msg = f"Reset {count} song(s). Playlists cleared."
-            if reset_enrichment:
-                enrich_count = _db.reset_enrichments()
-                msg += f" Reset enrichment for {enrich_count} song(s)."
-            _action["result"] = ("success", msg)
-            st.rerun()
+        if st.session_state.get("confirm_reset"):
+            enrichment = st.session_state.get("confirm_reset_enrichment", False)
+            msg = f"This will reset {status['classified']} classified song(s) and delete all playlists."
+            if enrichment:
+                msg += f" Also reset enrichment for {status['enriched']} song(s)."
+            st.warning(msg)
+            c1, c2 = st.columns(2)
+            if c1.button("Confirm Reset", type="primary", use_container_width=True):
+                from sweepify import db as _db
+
+                count = _db.reset_classifications()
+                result_msg = f"Reset {count} song(s). Playlists cleared."
+                if enrichment:
+                    enrich_count = _db.reset_enrichments()
+                    result_msg += f" Reset enrichment for {enrich_count} song(s)."
+                _action["result"] = ("success", result_msg)
+                st.session_state["confirm_reset"] = False
+                st.rerun()
+            if c2.button("Cancel", use_container_width=True, key="cancel_reset"):
+                st.session_state["confirm_reset"] = False
+                st.rerun()
 
     with maint_cols[1]:
         st.markdown("**Clear**")
         st.caption("Delete playlists from Spotify and reset")
         if st.button("Clear All", use_container_width=True, disabled=_disabled):
-            _run_action("Clear", _do_clear)
+            st.session_state["confirm_clear"] = True
+
+        if st.session_state.get("confirm_clear"):
+            st.warning(f"This will delete all sweepify playlists from Spotify and reset {status['classified']} classification(s).")
+            c1, c2 = st.columns(2)
+            if c1.button("Confirm Clear", type="primary", use_container_width=True):
+                st.session_state["confirm_clear"] = False
+                _run_action("Clear", _do_clear)
+            if c2.button("Cancel", use_container_width=True, key="cancel_clear"):
+                st.session_state["confirm_clear"] = False
+                st.rerun()
 
     with maint_cols[2]:
         st.markdown("**Status**")

@@ -90,6 +90,7 @@ class Song(BaseModel):
     related_artists: str | None = None
     enriched: bool = False
     classified: bool = False
+    refined: bool = False
     categories: str | None = None
     playlist_ids: str | None = None
     fetched_at: FetchedTimestamp = None

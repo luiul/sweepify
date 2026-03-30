@@ -228,6 +228,9 @@ def get_status() -> dict[str, int]:
         classified = conn.execute(
             "SELECT COUNT(*) FROM songs WHERE classified = 1",
         ).fetchone()[0]
+        refined = conn.execute(
+            "SELECT COUNT(*) FROM songs WHERE refined = 1",
+        ).fetchone()[0]
         playlists = conn.execute("SELECT COUNT(*) FROM playlists").fetchone()[0]
         # Count distinct categories across all songs' JSON arrays
         rows = conn.execute(
@@ -243,6 +246,7 @@ def get_status() -> dict[str, int]:
         "total": total,
         "enriched": enriched,
         "classified": classified,
+        "refined": refined,
         "unclassified": total - classified,
         "playlists": playlists,
         "categories": len(all_cats),
@@ -276,11 +280,29 @@ def get_category_stats() -> list[dict]:
     ]
 
 
+def mark_refined(song_ids: list[str]) -> None:
+    """Mark songs as refined."""
+    if not song_ids:
+        return
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in song_ids)
+        conn.execute(
+            f"UPDATE songs SET refined = 1 WHERE spotify_id IN ({placeholders})",  # noqa: S608
+            song_ids,
+        )
+
+
+def get_refined_song_count() -> int:
+    """Return the number of songs marked as refined."""
+    with get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM songs WHERE refined = 1").fetchone()[0]
+
+
 def reset_classifications() -> int:
     """Clear all classification data. Returns number of songs reset."""
     with get_connection() as conn:
         cursor = conn.execute(
-            "UPDATE songs SET classified = 0, categories = NULL, playlist_ids = NULL WHERE classified = 1",
+            "UPDATE songs SET classified = 0, refined = 0, categories = NULL, playlist_ids = NULL WHERE classified = 1",
         )
         conn.execute("DELETE FROM playlists")
         return cursor.rowcount
@@ -293,7 +315,7 @@ def reset_classifications_for_songs(song_ids: list[str]) -> int:
     with get_connection() as conn:
         placeholders = ",".join("?" for _ in song_ids)
         cursor = conn.execute(
-            f"UPDATE songs SET classified = 0, categories = NULL, playlist_ids = NULL "  # noqa: S608
+            f"UPDATE songs SET classified = 0, refined = 0, categories = NULL, playlist_ids = NULL "  # noqa: S608
             f"WHERE spotify_id IN ({placeholders})",
             song_ids,
         )

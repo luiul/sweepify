@@ -193,14 +193,27 @@ def test_get_status():
     assert s["total"] == 3
     assert s["enriched"] == 1
     assert s["classified"] == 1
+    assert s["refined"] == 0
     assert s["unclassified"] == 2
     assert s["playlists"] == 1
     assert s["categories"] == 2  # Rock and Chill
 
 
+def test_mark_refined():
+    db.upsert_songs([_make_song("1"), _make_song("2"), _make_song("3")])
+    db.mark_classified(["1", "2"], "Rock", "")
+    db.mark_refined(["1", "2"])
+
+    songs = db.get_all_songs()
+    refined = [s for s in songs if s.refined]
+    assert len(refined) == 2
+    assert db.get_refined_song_count() == 2
+
+
 def test_reset_classifications():
     db.upsert_songs([_make_song("1"), _make_song("2")])
     db.mark_classified(["1", "2"], "Pop", "pl_1")
+    db.mark_refined(["1", "2"])
     db.upsert_playlist(Playlist(spotify_id="pl_1", name="sweepify: Pop"))
 
     count = db.reset_classifications()
@@ -208,5 +221,6 @@ def test_reset_classifications():
 
     songs = db.get_all_songs()
     assert all(not s.classified for s in songs)
+    assert all(not s.refined for s in songs)
     assert all(s.categories is None for s in songs)
     assert len(db.get_playlists()) == 0

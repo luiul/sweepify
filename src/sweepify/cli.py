@@ -215,11 +215,13 @@ def _refine(max_playlists: int = 10) -> int:
         progress.update(task, total=1, completed=1)
 
     # Replace rough with refined
-    db.reset_classifications_for_songs(list(set(all_song_ids)))
+    unique_ids = list(set(all_song_ids))
+    db.reset_classifications_for_songs(unique_ids)
     classified_songs: set[str] = set()
     for cat in result.categories:
         db.mark_classified(cat.song_ids, cat.name, playlist_id="")
         classified_songs.update(cat.song_ids)
+    db.mark_refined(unique_ids)
 
     console.print("Categories:")
     for cat in result.categories:
@@ -296,16 +298,28 @@ def classify(playlist: str | None, max_playlists: int):
 
 @main.command()
 @click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of final playlists.")
-def refine(max_playlists: int):
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def refine(max_playlists: int, yes: bool):
     """Consolidate rough classifications into final categories."""
+    if not yes:
+        refined_count = db.get_refined_song_count()
+        if refined_count > 0:
+            console.print(f"{refined_count} song(s) are already refined. Re-refining will replace existing categories.")
+            click.confirm("Continue?", abort=True)
     _refine(max_playlists=max_playlists)
 
 
 @main.command()
 @click.option("--playlist", "-p", default=None, help="Only enrich songs from this playlist (name or ID).")
 @click.option("--force", "-f", is_flag=True, help="Re-enrich already enriched songs.")
-def enrich(playlist: str | None, force: bool):
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def enrich(playlist: str | None, force: bool, yes: bool):
     """Enrich songs with AI-generated metadata (mood, BPM, vibe, related artists)."""
+    if force and not yes:
+        s = db.get_status()
+        if s["enriched"] > 0:
+            console.print(f"This will re-enrich {s['enriched']} already enriched song(s).")
+            click.confirm("Are you sure?", abort=True)
     song_ids = None
     if playlist:
         from sweepify import spotify
@@ -376,6 +390,7 @@ def status():
     table.add_row("Total songs", str(s['total']))
     table.add_row("Enriched", str(s['enriched']))
     table.add_row("Classified", str(s['classified']))
+    table.add_row("Refined", str(s['refined']))
     table.add_row("Unclassified", str(s['unclassified']))
     table.add_row("Categories", str(s['categories']))
     table.add_row("Playlists", str(s['playlists']))
@@ -384,8 +399,22 @@ def status():
 
 @main.command()
 @click.option("--enrichment", is_flag=True, help="Also reset enrichment data (mood, BPM, vibe, related artists).")
-def reset(enrichment: bool):
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def reset(enrichment: bool, yes: bool):
     """Clear all classification data (keeps songs)."""
+    s = db.get_status()
+    if s["classified"] == 0 and (not enrichment or s["enriched"] == 0):
+        console.print("Nothing to reset.")
+        return
+
+    msg = f"This will reset {s['classified']} classified song(s) and delete all playlists."
+    if enrichment:
+        msg += f" Also reset enrichment for {s['enriched']} song(s)."
+    console.print(msg)
+
+    if not yes:
+        click.confirm("Are you sure?", abort=True)
+
     count = db.reset_classifications()
     console.print(f"Reset {count} song(s). Playlists cleared.")
     if enrichment:
