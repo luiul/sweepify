@@ -218,8 +218,6 @@ def classify_songs(
         )
         if on_batch_done:
             on_batch_done(1, result)
-        if on_refine_done:
-            on_refine_done(result)
         return result
 
     # Step 1: Parallel rough classification
@@ -353,6 +351,7 @@ def _refine_categories(
 
     # Build lookup: rough category name -> Category object
     rough_by_name = {c.name: c for c in rough_categories}
+    mapped_sources: set[str] = set()
 
     # Apply mapping: merge song_ids from source categories into final categories
     final_categories: list[Category] = []
@@ -361,12 +360,18 @@ def _refine_categories(
         for source in entry.source_categories:
             if source in rough_by_name:
                 merged_ids.extend(rough_by_name[source].song_ids)
+                mapped_sources.add(source)
         if merged_ids:
             final_categories.append(Category(
                 name=entry.final_name,
                 description=entry.description,
                 song_ids=merged_ids,
             ))
+
+    # Preserve unmapped rough categories so no songs are lost
+    for name, cat in rough_by_name.items():
+        if name not in mapped_sources:
+            final_categories.append(cat)
 
     return ClassificationResult(categories=final_categories)
 

@@ -259,6 +259,20 @@ def reset_classifications() -> int:
         return cursor.rowcount
 
 
+def reset_classifications_for_songs(song_ids: list[str]) -> int:
+    """Clear classification data for specific songs only. Returns number of songs reset."""
+    if not song_ids:
+        return 0
+    with get_connection() as conn:
+        placeholders = ",".join("?" for _ in song_ids)
+        cursor = conn.execute(
+            f"UPDATE songs SET classified = 0, categories = NULL, playlist_ids = NULL "  # noqa: S608
+            f"WHERE spotify_id IN ({placeholders})",
+            song_ids,
+        )
+        return cursor.rowcount
+
+
 def reset_enrichments() -> int:
     """Clear all enrichment data. Returns number of songs reset."""
     with get_connection() as conn:

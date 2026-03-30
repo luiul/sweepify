@@ -288,8 +288,9 @@ def _do_classify(max_playlists: int) -> str:
         _update_progress("Refining categories...", total_batches / steps if steps else 0.9)
 
     def on_refine_done(result: classifier.ClassificationResult) -> None:
-        # Overwrite rough classifications with refined ones
-        db.reset_classifications()
+        # Overwrite rough classifications with refined ones (only for these songs)
+        song_ids = [s.spotify_id for s in songs]
+        db.reset_classifications_for_songs(song_ids)
         classified_songs.clear()
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")

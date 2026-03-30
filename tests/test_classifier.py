@@ -59,7 +59,7 @@ def test_classify_songs_single_batch():
 
 
 def test_classify_songs_single_batch_callbacks():
-    """Single batch fires on_batch_done and on_refine_done but not on_refine_start."""
+    """Single batch fires on_batch_done only — no refinement callbacks."""
     client = MagicMock()
     client.messages.create.return_value = _mock_claude_response([
         {"name": "Pop", "description": "Pop music", "song_ids": ["t1"]},
@@ -80,7 +80,7 @@ def test_classify_songs_single_batch_callbacks():
     assert len(batch_done_calls) == 1
     assert batch_done_calls[0][0] == 1  # batch_num
     assert len(refine_start_calls) == 0  # no refinement for single batch
-    assert len(refine_done_calls) == 1  # but refine_done still fires with the result
+    assert len(refine_done_calls) == 0  # no refinement for single batch
 
 
 def test_classify_songs_with_code_fences():
@@ -280,3 +280,28 @@ def test_refine_categories():
     assert rock.song_ids == ["t1", "t2", "t3"]  # merged from Rock A + Rock B
     chill = next(c for c in result.categories if c.name == "Chill")
     assert chill.song_ids == ["t4", "t5"]
+
+
+def test_refine_categories_preserves_unmapped():
+    """Rough categories not covered by the refinement mapping are preserved."""
+    refined_response = _mock_refinement_response([
+        {"final_name": "Rock", "description": "All rock", "source_categories": ["Rock A"]},
+        # "Chill Vibes" is NOT mapped — should be preserved as-is
+    ])
+
+    client = MagicMock()
+    client.messages.create.return_value = refined_response
+
+    rough = [
+        Category(name="Rock A", description="Rock batch 1", song_ids=["t1", "t2"]),
+        Category(name="Chill Vibes", description="Relaxing", song_ids=["t3", "t4"]),
+    ]
+
+    result = _refine_categories(client, rough, max_playlists=5)
+
+    assert len(result.categories) == 2
+    rock = next(c for c in result.categories if c.name == "Rock")
+    assert rock.song_ids == ["t1", "t2"]
+    # Unmapped category preserved with original name
+    chill = next(c for c in result.categories if c.name == "Chill Vibes")
+    assert chill.song_ids == ["t3", "t4"]
