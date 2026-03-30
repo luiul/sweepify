@@ -249,6 +249,33 @@ def get_status() -> dict[str, int]:
     }
 
 
+def get_category_stats() -> list[dict]:
+    """Get song count and playlist status for each category."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT categories, playlist_ids FROM songs WHERE categories IS NOT NULL"
+        ).fetchall()
+        playlists = {
+            r["name"]: r["spotify_id"]
+            for r in conn.execute("SELECT name, spotify_id FROM playlists").fetchall()
+        }
+    cat_counts: dict[str, int] = {}
+    for r in rows:
+        try:
+            for c in json.loads(r["categories"]):
+                cat_counts[c] = cat_counts.get(c, 0) + 1
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return [
+        {
+            "category": name,
+            "songs": count,
+            "playlist": name in playlists,
+        }
+        for name, count in sorted(cat_counts.items(), key=lambda x: -x[1])
+    ]
+
+
 def reset_classifications() -> int:
     """Clear all classification data. Returns number of songs reset."""
     with get_connection() as conn:
