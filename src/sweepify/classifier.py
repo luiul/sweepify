@@ -11,7 +11,7 @@ BATCH_SIZE = 100
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a music curator. Given a list of songs with metadata (name, artist, album, genres), \
 group them into playlists. Create between 5 and {max_playlists} categories based on genre, mood, energy, \
-and thematic coherence. Each song must belong to exactly one category.
+and thematic coherence. Each song can appear in up to 4 categories if it fits naturally.
 
 Return your response as a JSON object with this exact structure:
 {{
@@ -25,7 +25,8 @@ Return your response as a JSON object with this exact structure:
 }}
 
 Important:
-- Every song_id from the input must appear in exactly one category
+- Every song_id from the input must appear in at least one category
+- A song may appear in up to 4 categories if it genuinely fits multiple playlists
 - Category names should be descriptive and evocative (e.g. "Late Night Drive", "Sunday Morning Coffee")
 - Do not use generic names like "Category 1" or "Miscellaneous"
 - Aim for balanced playlists — each category should have at least 5 songs
@@ -35,14 +36,14 @@ Important:
 DEFAULT_MAX_PLAYLISTS = 10
 
 FOLLOWUP_PROMPT_PREFIX = """Here are the existing categories from previous batches. \
-Assign each song to one of these categories. Only create a new category if a song truly \
+Assign each song to up to 4 of these categories. Only create a new category if a song truly \
 does not fit any existing one.
 
 Existing categories:
 """
 
 _FIXED_CATEGORIES_SYSTEM_PROMPT = """You are a music curator. Given a list of songs with metadata \
-(name, artist, album, genres), assign each song to one of the provided categories. \
+(name, artist, album, genres), assign each song to the provided categories. \
 Do NOT create any new categories — every song must go into one of the existing ones.
 
 Return your response as a JSON object with this exact structure:
@@ -57,7 +58,8 @@ Return your response as a JSON object with this exact structure:
 }
 
 Important:
-- Every song_id from the input must appear in exactly one category
+- Every song_id from the input must appear in at least one category
+- A song may appear in up to 4 categories if it genuinely fits multiple playlists
 - Use ONLY the provided category names — do not invent new ones
 - Aim for balanced distribution — avoid leaving most songs in a single category
 - Return ONLY the JSON object, no other text"""
@@ -219,7 +221,7 @@ def _classify_batch(
 
 
 _GENRE_SYSTEM_PROMPT = """You are a music curator. Given a list of songs that match certain genres, \
-organize them into playlists. Each song must belong to exactly one playlist.
+organize them into playlists. Each song can appear in up to 4 playlists if it fits naturally.
 
 Return your response as a JSON object with this exact structure:
 {
@@ -233,7 +235,8 @@ Return your response as a JSON object with this exact structure:
 }
 
 Important:
-- Every song_id from the input must appear in exactly one category
+- Every song_id from the input must appear in at least one category
+- A song may appear in up to 4 categories if it genuinely fits multiple playlists
 - Playlist names should be descriptive and evocative
 - Aim for balanced playlists — each should have at least 5 songs
 - Return ONLY the JSON object, no other text"""

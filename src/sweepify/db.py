@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 from sweepify.config import DB_DIR, DB_PATH
@@ -38,11 +39,31 @@ def _drop_removed_columns(conn: sqlite3.Connection, model: type, table_name: str
         conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {col}")
 
 
+def _migrate_multi_category(conn: sqlite3.Connection) -> None:
+    """Migrate from single category/playlist_id to multi-category categories/playlist_ids."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(songs)").fetchall()}
+    if "category" not in existing:
+        return
+    # Migrate data: category -> categories JSON array, playlist_id -> playlist_ids JSON object
+    rows = conn.execute(
+        "SELECT spotify_id, category, playlist_id FROM songs WHERE category IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        sid, category, playlist_id = row["spotify_id"], row["category"], row["playlist_id"]
+        categories = json.dumps([category])
+        playlist_ids = json.dumps({category: playlist_id}) if playlist_id else json.dumps({})
+        conn.execute(
+            "UPDATE songs SET categories = ?, playlist_ids = ? WHERE spotify_id = ?",
+            (categories, playlist_ids, sid),
+        )
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(generate_create_table(Song, "songs"))
         conn.execute(generate_create_table(Playlist, "playlists"))
         _ensure_columns(conn, Song, "songs")
+        _migrate_multi_category(conn)
         _drop_removed_columns(conn, Song, "songs")
 
 
@@ -103,15 +124,31 @@ def mark_enriched(enrichments: list[dict]) -> None:
 
 
 def mark_classified(song_ids: list[str], category: str, playlist_id: str) -> None:
+    """Add a category to each song's categories list and record the playlist_id mapping."""
     with get_connection() as conn:
-        conn.executemany(
-            """
-            UPDATE songs
-            SET classified = 1, category = ?, playlist_id = ?
-            WHERE spotify_id = ?
-            """,
-            [(category, playlist_id, sid) for sid in song_ids],
-        )
+        for sid in song_ids:
+            row = conn.execute(
+                "SELECT categories, playlist_ids FROM songs WHERE spotify_id = ?", (sid,)
+            ).fetchone()
+            if not row:
+                continue
+
+            # Parse existing arrays
+            cats = json.loads(row["categories"]) if row["categories"] else []
+            pids = json.loads(row["playlist_ids"]) if row["playlist_ids"] else {}
+
+            # Append category if not already present
+            if category not in cats:
+                cats.append(category)
+
+            # Record playlist_id mapping
+            if playlist_id:
+                pids[category] = playlist_id
+
+            conn.execute(
+                "UPDATE songs SET classified = 1, categories = ?, playlist_ids = ? WHERE spotify_id = ?",
+                (json.dumps(cats), json.dumps(pids), sid),
+            )
 
 
 # --- Playlists ---
@@ -138,15 +175,21 @@ def get_playlists() -> list[Playlist]:
 
 
 def get_songs_by_category() -> dict[str, list[Song]]:
-    """Get classified songs grouped by category, only those not yet added to a playlist."""
+    """Get classified songs grouped by category, only for categories not yet added to a playlist."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM songs WHERE classified = 1 AND (playlist_id IS NULL OR playlist_id = '')",
+            "SELECT * FROM songs WHERE classified = 1",
         ).fetchall()
     by_cat: dict[str, list[Song]] = {}
     for r in rows:
         song = Song.model_validate(dict(r))
-        by_cat.setdefault(song.category, []).append(song)
+        cats = json.loads(song.categories) if song.categories else []
+        pids = json.loads(song.playlist_ids) if song.playlist_ids else {}
+        # Include song in categories that don't have a playlist_id yet
+        for cat in cats:
+            pid = pids.get(cat)
+            if not pid:
+                by_cat.setdefault(cat, []).append(song)
     return by_cat
 
 
@@ -186,16 +229,23 @@ def get_status() -> dict[str, int]:
             "SELECT COUNT(*) FROM songs WHERE classified = 1",
         ).fetchone()[0]
         playlists = conn.execute("SELECT COUNT(*) FROM playlists").fetchone()[0]
-        categories = conn.execute(
-            "SELECT COUNT(DISTINCT category) FROM songs WHERE category IS NOT NULL",
-        ).fetchone()[0]
+        # Count distinct categories across all songs' JSON arrays
+        rows = conn.execute(
+            "SELECT categories FROM songs WHERE categories IS NOT NULL"
+        ).fetchall()
+    all_cats: set[str] = set()
+    for r in rows:
+        try:
+            all_cats.update(json.loads(r["categories"]))
+        except (json.JSONDecodeError, TypeError):
+            pass
     return {
         "total": total,
         "enriched": enriched,
         "classified": classified,
         "unclassified": total - classified,
         "playlists": playlists,
-        "categories": categories,
+        "categories": len(all_cats),
     }
 
 
@@ -203,7 +253,7 @@ def reset_classifications() -> int:
     """Clear all classification data. Returns number of songs reset."""
     with get_connection() as conn:
         cursor = conn.execute(
-            "UPDATE songs SET classified = 0, category = NULL, playlist_id = NULL WHERE classified = 1",
+            "UPDATE songs SET classified = 0, categories = NULL, playlist_ids = NULL WHERE classified = 1",
         )
         conn.execute("DELETE FROM playlists")
         return cursor.rowcount

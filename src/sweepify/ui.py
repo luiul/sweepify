@@ -234,12 +234,18 @@ def _do_classify(max_playlists: int) -> str:
     def on_progress(batch: int, total_batches: int, size: int) -> None:
         _check_cancel()
 
+    classified_songs: set[str] = set()
+
     def on_batch_done(result: classifier.ClassificationResult) -> None:
         nonlocal classified_count
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")
             classified_count += len(cat.song_ids)
-        _update_progress(f"Classifying: {classified_count}/{total} songs", classified_count / total)
+            classified_songs.update(cat.song_ids)
+        _update_progress(
+            f"Classifying: {len(classified_songs)}/{total} songs",
+            min(len(classified_songs) / total, 1.0),
+        )
         _check_cancel()
 
     result = classifier.classify_songs(
@@ -251,7 +257,7 @@ def _do_classify(max_playlists: int) -> str:
         fixed_categories=fixed_categories,
     )
     summary = ", ".join(f"{c.name} ({len(c.song_ids)})" for c in result.categories)
-    return f"Classified {classified_count} song(s) into {len(result.categories)} categories: {summary}"
+    return f"Classified {len(classified_songs)} song(s) into {len(result.categories)} categories: {summary}"
 
 
 def _do_create() -> str:
@@ -474,11 +480,24 @@ elif view == "Songs":
     if df.empty:
         st.info("No songs yet. Run `sweepify fetch` to get started.")
     else:
+        # Parse categories JSON for filtering
+        def _parse_categories(val):
+            if not val:
+                return []
+            try:
+                return json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                return []
+
+        all_cats: set[str] = set()
+        for c in df["categories"].dropna():
+            all_cats.update(_parse_categories(c))
+
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             search = st.text_input("Search (name or artist)")
         with col2:
-            categories = ["All"] + sorted(df["category"].dropna().unique().tolist())
+            categories = ["All"] + sorted(all_cats)
             cat_filter = st.selectbox("Category", categories)
         with col3:
             artists = ["All"] + sorted(df["artist"].dropna().unique().tolist())
@@ -496,7 +515,7 @@ elif view == "Songs":
             )
             filtered = filtered[mask]
         if cat_filter != "All":
-            filtered = filtered[filtered["category"] == cat_filter]
+            filtered = filtered[filtered["categories"].apply(lambda v: cat_filter in _parse_categories(v))]
         if artist_filter != "All":
             filtered = filtered[filtered["artist"] == artist_filter]
         if mood_filter != "All":
@@ -695,7 +714,17 @@ elif view == "Playlist Builder":
         playlists_df = load_table("playlists")
         if not playlists_df.empty:
             st.subheader("Existing Sweepify Playlists")
-            songs_per_playlist = df[df["category"].notna()].groupby("category").size().reset_index(name="songs")
+            # Explode categories JSON to count songs per category
+            cat_counts: dict[str, int] = {}
+            for cats_str in df["categories"].dropna():
+                try:
+                    for c in json.loads(cats_str):
+                        cat_counts[c] = cat_counts.get(c, 0) + 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            songs_per_playlist = pd.DataFrame(
+                [{"category": k, "songs": v} for k, v in cat_counts.items()]
+            ) if cat_counts else pd.DataFrame(columns=["category", "songs"])
             playlist_info = playlists_df.merge(
                 songs_per_playlist,
                 left_on="name",

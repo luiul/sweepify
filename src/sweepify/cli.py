@@ -137,7 +137,7 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
 
     console.print(f"Classifying {len(songs)} song(s) with Claude...")
     client = classifier.get_client()
-    classified_count = 0
+    classified_songs: set[str] = set()
 
     with _make_progress() as progress:
         task = progress.add_task("Classifying songs", total=len(songs))
@@ -146,10 +146,9 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
             progress.advance(task, size)
 
         def on_batch_done(result: classifier.ClassificationResult) -> None:
-            nonlocal classified_count
             for cat in result.categories:
                 db.mark_classified(cat.song_ids, cat.name, playlist_id="")
-                classified_count += len(cat.song_ids)
+                classified_songs.update(cat.song_ids)
 
         result = classifier.classify_songs(
             client, songs, on_progress=on_progress, on_batch_done=on_batch_done,
@@ -160,8 +159,8 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
     for cat in result.categories:
         console.print(f"  {cat.name}: {len(cat.song_ids)} song(s)")
 
-    console.print(f"Classified {classified_count} song(s) into {len(result.categories)} categories.")
-    return classified_count
+    console.print(f"Classified {len(classified_songs)} song(s) into {len(result.categories)} categories.")
+    return len(classified_songs)
 
 
 def _create() -> int:

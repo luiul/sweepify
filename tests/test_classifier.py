@@ -108,6 +108,22 @@ def test_format_songs_excludes_enrichment_when_not_enriched():
     assert "bpm:" not in prompt
 
 
+def test_classify_songs_multi_category():
+    """Songs can appear in multiple categories."""
+    client = MagicMock()
+    client.messages.create.return_value = _mock_claude_response([
+        {"name": "Rock Anthems", "description": "Classic rock", "song_ids": ["t1", "t2"]},
+        {"name": "Chill Vibes", "description": "Relaxing", "song_ids": ["t1", "t3"]},
+    ])
+
+    songs = [_make_song("t1"), _make_song("t2"), _make_song("t3")]
+    result = classify_songs(client, songs)
+
+    assert len(result.categories) == 2
+    assert "t1" in result.categories[0].song_ids  # t1 in Rock
+    assert "t1" in result.categories[1].song_ids  # t1 in Chill too
+
+
 def test_build_user_prompt_followup_batch():
     songs = [_make_song("t2")]
     existing = [Category(name="Rock", description="Rock songs", song_ids=["t1"])]

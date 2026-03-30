@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -34,6 +35,8 @@ def test_ensure_columns_adds_missing():
     assert "vibe" in cols
     assert "related_artists" in cols
     assert "enriched" in cols
+    assert "categories" in cols
+    assert "playlist_ids" in cols
 
 
 def test_upsert_songs_inserts():
@@ -60,14 +63,66 @@ def test_get_unclassified_songs():
     assert unclassified[0].spotify_id == "2"
 
 
-def test_mark_classified():
+def test_mark_classified_single_category():
     db.upsert_songs([_make_song("1")])
     db.mark_classified(["1"], "Chill", "pl_123")
 
     songs = db.get_all_songs()
     assert songs[0].classified is True
-    assert songs[0].category == "Chill"
-    assert songs[0].playlist_id == "pl_123"
+    cats = json.loads(songs[0].categories)
+    pids = json.loads(songs[0].playlist_ids)
+    assert cats == ["Chill"]
+    assert pids == {"Chill": "pl_123"}
+
+
+def test_mark_classified_multiple_categories():
+    db.upsert_songs([_make_song("1")])
+    db.mark_classified(["1"], "Chill", "")
+    db.mark_classified(["1"], "Late Night", "")
+    db.mark_classified(["1"], "Chill", "pl_123")  # Add playlist_id for Chill
+
+    songs = db.get_all_songs()
+    cats = json.loads(songs[0].categories)
+    pids = json.loads(songs[0].playlist_ids)
+    assert sorted(cats) == ["Chill", "Late Night"]
+    assert pids["Chill"] == "pl_123"
+    assert "Late Night" not in pids  # No playlist_id yet
+
+
+def test_mark_classified_no_duplicate_categories():
+    db.upsert_songs([_make_song("1")])
+    db.mark_classified(["1"], "Rock", "")
+    db.mark_classified(["1"], "Rock", "pl_1")  # Same category, now with playlist_id
+
+    songs = db.get_all_songs()
+    cats = json.loads(songs[0].categories)
+    assert cats == ["Rock"]  # Not duplicated
+
+
+def test_get_songs_by_category():
+    db.upsert_songs([_make_song("1"), _make_song("2")])
+    db.mark_classified(["1"], "Rock", "")
+    db.mark_classified(["1"], "Chill", "")
+    db.mark_classified(["2"], "Rock", "")
+
+    by_cat = db.get_songs_by_category()
+    assert "Rock" in by_cat
+    assert "Chill" in by_cat
+    assert len(by_cat["Rock"]) == 2
+    assert len(by_cat["Chill"]) == 1
+
+
+def test_get_songs_by_category_excludes_fulfilled():
+    db.upsert_songs([_make_song("1")])
+    db.mark_classified(["1"], "Rock", "")
+    db.mark_classified(["1"], "Chill", "")
+
+    # Fulfill Rock
+    db.mark_classified(["1"], "Rock", "pl_1")
+
+    by_cat = db.get_songs_by_category()
+    assert "Rock" not in by_cat  # Already has playlist_id
+    assert "Chill" in by_cat
 
 
 def test_upsert_and_get_playlists():
@@ -127,6 +182,7 @@ def test_reset_enrichments():
 def test_get_status():
     db.upsert_songs([_make_song("1"), _make_song("2"), _make_song("3")])
     db.mark_classified(["1"], "Rock", "pl_1")
+    db.mark_classified(["1"], "Chill", "")
     db.mark_enriched([{
         "spotify_id": "2", "mood": "chill", "bpm": 90,
         "vibe": "v", "related_artists": "[]",
@@ -139,7 +195,7 @@ def test_get_status():
     assert s["classified"] == 1
     assert s["unclassified"] == 2
     assert s["playlists"] == 1
-    assert s["categories"] == 1
+    assert s["categories"] == 2  # Rock and Chill
 
 
 def test_reset_classifications():
@@ -152,5 +208,5 @@ def test_reset_classifications():
 
     songs = db.get_all_songs()
     assert all(not s.classified for s in songs)
-    assert all(s.category is None for s in songs)
+    assert all(s.categories is None for s in songs)
     assert len(db.get_playlists()) == 0
