@@ -360,7 +360,10 @@ def refine_categories(
         if name not in mapped_sources:
             final_categories.append(cat)
 
-    return ClassificationResult(categories=final_categories)
+    # Deduplicate: Claude may return the same final_name in multiple mapping entries
+    deduped = _merge_categories([], final_categories)
+
+    return ClassificationResult(categories=deduped)
 
 
 _GENRE_SYSTEM_PROMPT = """You are a music curator. Given a list of songs that match certain genres, \
