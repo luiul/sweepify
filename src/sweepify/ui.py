@@ -8,7 +8,7 @@ import plotly.express as px
 import streamlit as st
 
 from sweepify.config import DB_PATH
-from sweepify.db import get_category_stats, get_connection, get_songs_by_genres, get_status, init_db
+from sweepify.db import get_connection, get_songs_by_genres, get_status, init_db
 
 st.set_page_config(page_title="sweepify", page_icon="🧹", layout="wide")
 
@@ -38,13 +38,6 @@ cols[1].metric("Classified", status["classified"])
 cols[2].metric("Unclassified", status["unclassified"])
 st.sidebar.metric("Categories", status["categories"])
 st.sidebar.metric("Playlists", status["playlists"])
-
-cat_stats = get_category_stats()
-if cat_stats:
-    with st.sidebar.expander(f"Categories ({len(cat_stats)})", expanded=False):
-        for cs in cat_stats:
-            icon = "\u2705" if cs["playlist"] else "\u23f3"
-            st.markdown(f"{icon} **{cs['category']}** — {cs['songs']} songs")
 
 view = st.sidebar.radio("View", ["Actions", "Songs", "Categories", "Genres", "Enrichment", "Playlists", "Playlist Builder", "SQL"])
 
