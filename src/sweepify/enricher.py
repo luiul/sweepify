@@ -74,24 +74,43 @@ def _format_songs_for_prompt(songs: list[Song]) -> str:
     return "\n".join(lines)
 
 
+MAX_WORKERS = 4
+
+
 def enrich_songs(
     client: typing.Any,
     songs: list[Song],
     on_progress: typing.Callable[[int, int, int], None] | None = None,
     on_batch_done: typing.Callable[[EnrichmentResult], None] | None = None,
+    max_workers: int = MAX_WORKERS,
 ) -> EnrichmentResult:
-    """Enrich songs with AI-generated metadata. Handles batching for large collections."""
-    all_enrichments: list[SongEnrichment] = []
-    total_batches = (len(songs) + BATCH_SIZE - 1) // BATCH_SIZE
+    """Enrich songs with AI-generated metadata. Handles batching for large collections.
 
-    for batch_num, i in enumerate(range(0, len(songs), BATCH_SIZE), 1):
-        batch = songs[i : i + BATCH_SIZE]
-        if on_progress:
+    Batches are processed concurrently (up to max_workers at a time) for speed.
+    on_batch_done is called as each batch completes, allowing incremental persistence.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    batches = [songs[i : i + BATCH_SIZE] for i in range(0, len(songs), BATCH_SIZE)]
+    total_batches = len(batches)
+    all_enrichments: list[SongEnrichment] = []
+    lock = __import__("threading").Lock()
+
+    if on_progress:
+        for batch_num, batch in enumerate(batches, 1):
             on_progress(batch_num, total_batches, len(batch))
-        result = _enrich_batch(client, batch)
-        if on_batch_done:
-            on_batch_done(result)
-        all_enrichments.extend(result.songs)
+
+    def _process_batch(batch: list[Song]) -> EnrichmentResult:
+        return _enrich_batch(client, batch)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, total_batches)) as pool:
+        futures = {pool.submit(_process_batch, batch): i for i, batch in enumerate(batches)}
+        for future in as_completed(futures):
+            result = future.result()
+            with lock:
+                all_enrichments.extend(result.songs)
+            if on_batch_done:
+                on_batch_done(result)
 
     return EnrichmentResult(songs=all_enrichments)
 

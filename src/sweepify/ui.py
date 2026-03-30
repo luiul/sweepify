@@ -195,11 +195,9 @@ def _do_enrich(force: bool) -> str:
     client = get_client()
     enriched_count = 0
 
-    def on_progress(batch: int, total_batches: int, size: int) -> None:
-        _check_cancel()
-
     def on_batch_done(result: enricher.EnrichmentResult) -> None:
         nonlocal enriched_count
+        _check_cancel()
         db.mark_enriched(
             [
                 {
@@ -214,9 +212,8 @@ def _do_enrich(force: bool) -> str:
         )
         enriched_count += len(result.songs)
         _update_progress(f"Enriching: {enriched_count}/{total} songs", enriched_count / total)
-        _check_cancel()
 
-    enricher.enrich_songs(client, songs, on_progress=on_progress, on_batch_done=on_batch_done)
+    enricher.enrich_songs(client, songs, on_batch_done=on_batch_done)
     return f"Enriched {enriched_count} song(s)."
 
 

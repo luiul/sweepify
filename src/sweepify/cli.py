@@ -91,9 +91,6 @@ def _enrich(song_ids: list[str] | None = None, force: bool = False) -> int:
     with _make_progress() as progress:
         task = progress.add_task("Enriching songs", total=len(songs))
 
-        def on_progress(batch: int, total: int, size: int) -> None:
-            progress.advance(task, size)
-
         def on_batch_done(result: enricher.EnrichmentResult) -> None:
             nonlocal enriched_count
             db.mark_enriched([
@@ -107,8 +104,9 @@ def _enrich(song_ids: list[str] | None = None, force: bool = False) -> int:
                 for e in result.songs
             ])
             enriched_count += len(result.songs)
+            progress.advance(task, len(result.songs))
 
-        enricher.enrich_songs(client, songs, on_progress=on_progress, on_batch_done=on_batch_done)
+        enricher.enrich_songs(client, songs, on_batch_done=on_batch_done)
 
     console.print(f"Enriched {enriched_count} song(s).")
     return enriched_count
