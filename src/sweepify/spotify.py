@@ -26,15 +26,12 @@ def fetch_liked_songs(
     playlist: str | None = None,
     on_progress: typing.Callable[[int, int], None] | None = None,
     on_genre_progress: typing.Callable[[int, int], None] | None = None,
-    on_audio_progress: typing.Callable[[int, int], None] | None = None,
 ) -> list[Song]:
     """Fetch songs from Liked Songs or a specific playlist by name/ID."""
     if playlist:
         playlist_id = _resolve_playlist(sp, playlist)
-        songs = _fetch_playlist_tracks(sp, playlist_id, on_progress=on_progress, on_genre_progress=on_genre_progress)
-    else:
-        songs = _fetch_saved_tracks(sp, on_progress=on_progress, on_genre_progress=on_genre_progress)
-    return _enrich_with_audio_features(sp, songs, on_progress=on_audio_progress)
+        return _fetch_playlist_tracks(sp, playlist_id, on_progress=on_progress, on_genre_progress=on_genre_progress)
+    return _fetch_saved_tracks(sp, on_progress=on_progress, on_genre_progress=on_genre_progress)
 
 
 def _resolve_playlist(sp: spotipy.Spotify, playlist: str) -> str:
@@ -135,7 +132,6 @@ def _parse_track(track: dict, added_at: str | None = None) -> tuple[Song, list[s
         artist=artist_names,
         album=track["album"]["name"],
         added_at=added_at,
-        popularity=track.get("popularity"),
         duration_ms=track.get("duration_ms"),
         explicit=track.get("explicit"),
         release_date=track.get("album", {}).get("release_date"),
@@ -181,58 +177,6 @@ def _enrich_with_genres(
         genre_json = json.dumps(sorted(genres)) if genres else None
         enriched.append(song.model_copy(update={"genres": genre_json}))
 
-    return enriched
-
-
-def _enrich_with_audio_features(
-    sp: spotipy.Spotify,
-    songs: list[Song],
-    on_progress: typing.Callable[[int, int], None] | None = None,
-) -> list[Song]:
-    """Fetch audio features in batches and attach to songs. Skips gracefully if endpoint is restricted."""
-    if not songs:
-        return songs
-
-    track_ids = [s.spotify_id for s in songs]
-    audio_map: dict[str, dict] = {}
-    total = len(track_ids)
-
-    for i in range(0, len(track_ids), 100):
-        batch = track_ids[i : i + 100]
-        try:
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                results = sp.audio_features(batch)
-            if results:
-                for feat in results:
-                    if feat and feat.get("id"):
-                        audio_map[feat["id"]] = feat
-        except Exception:
-            # Endpoint restricted for this app — skip entirely
-            if on_progress:
-                on_progress(total, total)
-            return songs
-        if on_progress:
-            on_progress(min(i + 100, total), total)
-
-    if not audio_map:
-        return songs
-
-    enriched = []
-    for song in songs:
-        feat = audio_map.get(song.spotify_id)
-        if feat:
-            enriched.append(song.model_copy(update={
-                "danceability": feat.get("danceability"),
-                "energy": feat.get("energy"),
-                "valence": feat.get("valence"),
-                "tempo": feat.get("tempo"),
-                "acousticness": feat.get("acousticness"),
-                "instrumentalness": feat.get("instrumentalness"),
-            }))
-        else:
-            enriched.append(song)
     return enriched
 
 

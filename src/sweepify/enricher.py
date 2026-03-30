@@ -66,8 +66,6 @@ def _format_songs_for_prompt(songs: list[Song]) -> str:
             s.album or "unknown",
             f"genres: {genres}",
         ]
-        if s.popularity is not None:
-            parts.append(f"popularity: {s.popularity}")
         if s.release_date:
             parts.append(f"released: {s.release_date}")
         lines.append("- " + " | ".join(parts))

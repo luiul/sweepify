@@ -81,16 +81,9 @@ class Song(BaseModel):
     album: str | None = None
     genres: str | None = None
     added_at: str | None = None
-    popularity: int | None = None
     duration_ms: int | None = None
     explicit: bool | None = None
     release_date: str | None = None
-    danceability: float | None = None
-    energy: float | None = None
-    valence: float | None = None
-    tempo: float | None = None
-    acousticness: float | None = None
-    instrumentalness: float | None = None
     mood: str | None = None
     bpm: int | None = None
     vibe: str | None = None

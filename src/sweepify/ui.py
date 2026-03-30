@@ -154,24 +154,18 @@ def _do_fetch(playlist: str | None) -> str:
     def on_fetch(fetched: int, total: int) -> None:
         _check_cancel()
         pct = fetched / total if total else 0
-        _update_progress(f"Fetching: {fetched}/{total} songs", pct * 0.5)
+        _update_progress(f"Fetching: {fetched}/{total} songs", pct * 0.6)
 
     def on_genre(processed: int, total: int) -> None:
         _check_cancel()
         pct = processed / total if total else 0
-        _update_progress(f"Genres: {processed}/{total} artists", 0.5 + pct * 0.25)
-
-    def on_audio(processed: int, total: int) -> None:
-        _check_cancel()
-        pct = processed / total if total else 0
-        _update_progress(f"Audio features: {processed}/{total} tracks", 0.75 + pct * 0.2)
+        _update_progress(f"Genres: {processed}/{total} artists", 0.6 + pct * 0.35)
 
     songs = spotify.fetch_liked_songs(
         sp,
         playlist=playlist,
         on_progress=on_fetch,
         on_genre_progress=on_genre,
-        on_audio_progress=on_audio,
     )
 
     _update_progress("Saving to database...", 0.95)
@@ -600,7 +594,7 @@ elif view == "Genres":
             )
             if selected_genre:
                 genre_songs = exploded[exploded["genre_list"] == selected_genre][
-                    ["name", "artist", "album", "popularity", "release_date"]
+                    ["name", "artist", "album", "release_date"]
                 ]
                 st.dataframe(
                     genre_songs,

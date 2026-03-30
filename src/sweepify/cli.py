@@ -40,7 +40,6 @@ def _fetch(playlist: str | None = None) -> list[str]:
     with _make_progress() as progress:
         fetch_task = progress.add_task(f"Fetching songs from {source}", total=None)
         genre_task = progress.add_task("Enriching genres", total=None, visible=False)
-        audio_task = progress.add_task("Audio features", total=None, visible=False)
 
         def on_fetch(fetched: int, total: int) -> None:
             progress.update(fetch_task, completed=fetched, total=total)
@@ -48,16 +47,12 @@ def _fetch(playlist: str | None = None) -> list[str]:
         def on_genre(processed: int, total: int) -> None:
             progress.update(genre_task, completed=processed, total=total, visible=True)
 
-        def on_audio(processed: int, total: int) -> None:
-            progress.update(audio_task, completed=processed, total=total, visible=True)
-
         songs = spotify.fetch_liked_songs(
             sp, playlist=playlist,
-            on_progress=on_fetch, on_genre_progress=on_genre, on_audio_progress=on_audio,
+            on_progress=on_fetch, on_genre_progress=on_genre,
         )
         progress.update(fetch_task, completed=progress.tasks[fetch_task].total or len(songs))
         progress.update(genre_task, completed=progress.tasks[genre_task].total or 0, visible=progress.tasks[genre_task].visible)
-        progress.update(audio_task, completed=progress.tasks[audio_task].total or 0, visible=progress.tasks[audio_task].visible)
 
     console.print(f"Fetched {len(songs)} song(s) from Spotify.")
 

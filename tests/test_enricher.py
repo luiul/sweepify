@@ -78,7 +78,7 @@ def test_format_songs_for_prompt():
     songs = [
         Song(
             spotify_id="t1", name="My Song", artist="The Band", album="The Album",
-            genres='["rock", "indie"]', popularity=75, release_date="2023-05-01",
+            genres='["rock", "indie"]', release_date="2023-05-01",
         ),
     ]
     prompt = _format_songs_for_prompt(songs)
@@ -86,7 +86,6 @@ def test_format_songs_for_prompt():
     assert "t1" in prompt
     assert "My Song" in prompt
     assert "The Band" in prompt
-    assert "popularity: 75" in prompt
     assert "released: 2023-05-01" in prompt
 
 

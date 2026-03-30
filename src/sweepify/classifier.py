@@ -106,18 +106,6 @@ def _format_songs_for_prompt(songs: list[Song]) -> str:
     for s in songs:
         genres = s.genres or "unknown"
         line = f"- id={s.spotify_id} | {s.name} | {s.artist} | {s.album} | genres: {genres}"
-        # Spotify audio features
-        audio_parts = []
-        if s.tempo is not None:
-            audio_parts.append(f"tempo: {s.tempo:.0f}")
-        if s.energy is not None:
-            audio_parts.append(f"energy: {s.energy:.2f}")
-        if s.danceability is not None:
-            audio_parts.append(f"dance: {s.danceability:.2f}")
-        if s.valence is not None:
-            audio_parts.append(f"valence: {s.valence:.2f}")
-        if audio_parts:
-            line += " | " + " | ".join(audio_parts)
         # AI enrichment
         if s.enriched:
             line += f" | mood: {s.mood} | bpm: {s.bpm} | vibe: {s.vibe}"
