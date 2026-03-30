@@ -117,7 +117,7 @@ def _enrich(song_ids: list[str] | None = None, force: bool = False) -> int:
 
 
 def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int:
-    """Classify unclassified songs. Returns number of songs classified.
+    """Rough-classify unclassified songs. Returns number of songs classified.
 
     If song_ids is provided, only classify those songs (that are also unclassified).
     If max_playlists is 0, classify only into existing sweepify playlists.
@@ -153,9 +153,8 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
     classified_songs: set[str] = set()
 
     with _make_progress() as progress:
-        overall = progress.add_task("Rough classification", total=len(songs))
+        overall = progress.add_task("Classifying", total=len(songs))
         batch_tasks: dict[int, int] = {}
-        refine_task: int | None = None
 
         def on_batch_start(batch_num: int, total: int, size: int) -> None:
             batch_tasks[batch_num] = progress.add_task(
@@ -167,45 +166,66 @@ def _classify(song_ids: list[str] | None = None, max_playlists: int = 10) -> int
             if batch_num in batch_tasks:
                 progress.update(batch_tasks[batch_num], completed=count)
             progress.advance(overall, count)
-            # Persist rough results so progress is saved if interrupted
             for cat in result.categories:
                 db.mark_classified(cat.song_ids, cat.name, playlist_id="")
                 classified_songs.update(cat.song_ids)
 
-        def on_refine_start() -> None:
-            nonlocal refine_task
-            # Hide batch rows
-            for tid in batch_tasks.values():
-                progress.update(tid, visible=False)
-            progress.update(overall, visible=False)
-            refine_task = progress.add_task("Refining categories...", total=None)
-
-        def on_refine_done(result: classifier.ClassificationResult) -> None:
-            if refine_task is not None:
-                progress.update(refine_task, total=1, completed=1)
-            # Overwrite rough classifications with refined ones (only for these songs)
-            song_ids = [s.spotify_id for s in songs]
-            db.reset_classifications_for_songs(song_ids)
-            classified_songs.clear()
-            for cat in result.categories:
-                db.mark_classified(cat.song_ids, cat.name, playlist_id="")
-                classified_songs.update(cat.song_ids)
-
-        result = classifier.classify_songs(
+        classifier.classify_songs(
             client, songs,
             on_batch_start=on_batch_start,
             on_batch_done=on_batch_done,
-            on_refine_start=on_refine_start,
-            on_refine_done=on_refine_done,
             max_playlists=max_playlists,
             fixed_categories=fixed_categories,
         )
+
+    console.print(f"Classified {len(classified_songs)} song(s).")
+    if total_batches > 1 and fixed_categories is None:
+        console.print("Run 'sweepify refine' to consolidate categories.")
+    return len(classified_songs)
+
+
+def _refine(max_playlists: int = 10) -> int:
+    """Refine rough classifications into consolidated categories. Returns number of songs refined."""
+    from sweepify import classifier
+
+    songs_by_cat = db.get_songs_by_category()
+    if not songs_by_cat:
+        console.print("No unrefined classifications found. Run 'sweepify classify' first.")
+        return 0
+
+    rough_categories = [
+        classifier.Category(
+            name=name,
+            description=f"{len(songs)} songs",
+            song_ids=[s.spotify_id for s in songs],
+        )
+        for name, songs in songs_by_cat.items()
+    ]
+
+    all_song_ids = []
+    for cat in rough_categories:
+        all_song_ids.extend(cat.song_ids)
+
+    console.print(f"Refining {len(rough_categories)} rough categories ({len(set(all_song_ids))} songs)...")
+    client = classifier.get_client()
+
+    with _make_progress() as progress:
+        task = progress.add_task("Refining categories...", total=None)
+        result = classifier.refine_categories(client, rough_categories, max_playlists=max_playlists)
+        progress.update(task, total=1, completed=1)
+
+    # Replace rough with refined
+    db.reset_classifications_for_songs(list(set(all_song_ids)))
+    classified_songs: set[str] = set()
+    for cat in result.categories:
+        db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+        classified_songs.update(cat.song_ids)
 
     console.print("Categories:")
     for cat in result.categories:
         console.print(f"  {cat.name}: {len(cat.song_ids)} song(s)")
 
-    console.print(f"Classified {len(classified_songs)} song(s) into {len(result.categories)} categories.")
+    console.print(f"Refined into {len(result.categories)} categories ({len(classified_songs)} songs).")
     return len(classified_songs)
 
 
@@ -275,6 +295,13 @@ def classify(playlist: str | None, max_playlists: int):
 
 
 @main.command()
+@click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of final playlists.")
+def refine(max_playlists: int):
+    """Consolidate rough classifications into final categories."""
+    _refine(max_playlists=max_playlists)
+
+
+@main.command()
 @click.option("--playlist", "-p", default=None, help="Only enrich songs from this playlist (name or ID).")
 @click.option("--force", "-f", is_flag=True, help="Re-enrich already enriched songs.")
 def enrich(playlist: str | None, force: bool):
@@ -299,29 +326,37 @@ def create():
 @click.option("--playlist", "-p", default=None, help="Fetch from a specific playlist instead of Liked Songs.")
 @click.option("--max-playlists", "-n", default=10, show_default=True, help="Maximum number of playlists to create. Use 0 to only classify into existing playlists.")
 def run(playlist: str | None, max_playlists: int):
-    """Run full pipeline: fetch → enrich → classify → create."""
-    console.rule("[bold]Step 1/4: Fetch")
+    """Run full pipeline: fetch → enrich → classify → refine → create."""
+    console.rule("[bold]Step 1/5: Fetch")
     try:
         fetched_ids = _fetch(playlist=playlist)
     except Exception as e:
         console.print(f"[red]Error during fetch: {e}[/red]")
         raise click.Abort()
 
-    console.rule("[bold]Step 2/4: Enrich")
+    console.rule("[bold]Step 2/5: Enrich")
     try:
         _enrich(song_ids=fetched_ids if playlist else None)
     except Exception as e:
         console.print(f"[red]Error during enrichment: {e}[/red]")
         raise click.Abort()
 
-    console.rule("[bold]Step 3/4: Classify")
+    console.rule("[bold]Step 3/5: Classify")
     try:
         _classify(song_ids=fetched_ids if playlist else None, max_playlists=max_playlists)
     except Exception as e:
         console.print(f"[red]Error during classify: {e}[/red]")
         raise click.Abort()
 
-    console.rule("[bold]Step 4/4: Create Playlists")
+    if max_playlists != 0:
+        console.rule("[bold]Step 4/5: Refine")
+        try:
+            _refine(max_playlists=max_playlists)
+        except Exception as e:
+            console.print(f"[red]Error during refinement: {e}[/red]")
+            console.print("Rough classifications preserved. Retry with 'sweepify refine'.")
+
+    console.rule("[bold]Step 5/5: Create Playlists")
     try:
         _create()
     except Exception as e:

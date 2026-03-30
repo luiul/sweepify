@@ -6,7 +6,7 @@ from sweepify.classifier import (
     _build_user_prompt,
     _format_songs_for_prompt,
     _merge_categories,
-    _refine_categories,
+    refine_categories,
     Category,
     classify_songs,
 )
@@ -59,28 +59,25 @@ def test_classify_songs_single_batch():
 
 
 def test_classify_songs_single_batch_callbacks():
-    """Single batch fires on_batch_done only — no refinement callbacks."""
+    """Single batch fires on_batch_start and on_batch_done."""
     client = MagicMock()
     client.messages.create.return_value = _mock_claude_response([
         {"name": "Pop", "description": "Pop music", "song_ids": ["t1"]},
     ])
 
+    batch_start_calls = []
     batch_done_calls = []
-    refine_start_calls = []
-    refine_done_calls = []
 
     songs = [_make_song("t1")]
     classify_songs(
         client, songs,
+        on_batch_start=lambda bn, t, s: batch_start_calls.append(bn),
         on_batch_done=lambda bn, r: batch_done_calls.append((bn, r)),
-        on_refine_start=lambda: refine_start_calls.append(True),
-        on_refine_done=lambda r: refine_done_calls.append(r),
     )
 
+    assert len(batch_start_calls) == 1
     assert len(batch_done_calls) == 1
     assert batch_done_calls[0][0] == 1  # batch_num
-    assert len(refine_start_calls) == 0  # no refinement for single batch
-    assert len(refine_done_calls) == 0  # no refinement for single batch
 
 
 def test_classify_songs_with_code_fences():
@@ -176,53 +173,39 @@ def test_build_user_prompt_followup_batch():
     assert "t2" in prompt
 
 
-def test_classify_songs_parallel_with_refinement():
-    """Multi-batch triggers parallel rough pass + refinement call."""
-    # Need 2+ batches: BATCH_SIZE is 100, so 150 songs = 2 batches
+def test_classify_songs_parallel_multi_batch():
+    """Multi-batch triggers parallel rough classification (no refinement)."""
     songs = [_make_song(f"t{i}") for i in range(150)]
 
-    # Batch 1 response (first 100 songs)
     batch1_response = _mock_claude_response([
         {"name": "Rock A", "description": "Rock batch 1", "song_ids": [f"t{i}" for i in range(50)]},
         {"name": "Chill A", "description": "Chill batch 1", "song_ids": [f"t{i}" for i in range(50, 100)]},
     ])
-    # Batch 2 response (next 50 songs)
     batch2_response = _mock_claude_response([
-        {"name": "Rock B", "description": "Rock batch 2", "song_ids": [f"t{i}" for i in range(100, 130)]},
+        {"name": "Rock A", "description": "Rock batch 2", "song_ids": [f"t{i}" for i in range(100, 130)]},
         {"name": "Jazz", "description": "Jazz batch 2", "song_ids": [f"t{i}" for i in range(130, 150)]},
-    ])
-    # Refinement response (mapping, not song_ids)
-    refine_response = _mock_refinement_response([
-        {"final_name": "Rock", "description": "All rock", "source_categories": ["Rock A", "Rock B"]},
-        {"final_name": "Chill", "description": "Chill vibes", "source_categories": ["Chill A"]},
-        {"final_name": "Jazz", "description": "Jazz tunes", "source_categories": ["Jazz"]},
     ])
 
     client = MagicMock()
-    client.messages.create.side_effect = [batch1_response, batch2_response, refine_response]
+    client.messages.create.side_effect = [batch1_response, batch2_response]
 
     batch_start_calls = []
     batch_done_calls = []
-    refine_start_called = []
-    refine_done_calls = []
 
     result = classify_songs(
         client, songs,
         on_batch_start=lambda bn, t, s: batch_start_calls.append(bn),
         on_batch_done=lambda bn, r: batch_done_calls.append(bn),
-        on_refine_start=lambda: refine_start_called.append(True),
-        on_refine_done=lambda r: refine_done_calls.append(r),
     )
 
-    # 2 batch calls + 1 refinement call = 3 API calls
-    assert client.messages.create.call_count == 3
+    # 2 batch calls only (no refinement)
+    assert client.messages.create.call_count == 2
     assert len(batch_start_calls) == 2
     assert len(batch_done_calls) == 2
-    assert len(refine_start_called) == 1
-    assert len(refine_done_calls) == 1
-    # Final result is from refinement
-    assert len(result.categories) == 3
-    assert {c.name for c in result.categories} == {"Rock", "Chill", "Jazz"}
+    # Categories merged by name across batches
+    assert {c.name for c in result.categories} == {"Rock A", "Chill A", "Jazz"}
+    rock = next(c for c in result.categories if c.name == "Rock A")
+    assert len(rock.song_ids) == 80  # 50 + 30
 
 
 def test_fixed_categories_parallel_no_refinement():
@@ -241,17 +224,13 @@ def test_fixed_categories_parallel_no_refinement():
     client = MagicMock()
     client.messages.create.side_effect = [batch_response, batch2_response]
 
-    refine_start_called = []
-
     result = classify_songs(
         client, songs,
         fixed_categories=["Rock", "Pop"],
-        on_refine_start=lambda: refine_start_called.append(True),
     )
 
-    # 2 batch calls, no refinement call
+    # 2 batch calls, no refinement
     assert client.messages.create.call_count == 2
-    assert len(refine_start_called) == 0
     # Categories merged by name
     rock = next(c for c in result.categories if c.name == "Rock")
     assert len(rock.song_ids) == 75 + 30  # from both batches
@@ -273,7 +252,7 @@ def test_refine_categories():
         Category(name="Chill Vibes", description="Relaxing", song_ids=["t4", "t5"]),
     ]
 
-    result = _refine_categories(client, rough, max_playlists=5)
+    result = refine_categories(client, rough, max_playlists=5)
 
     assert len(result.categories) == 2
     rock = next(c for c in result.categories if c.name == "Rock Anthems")
@@ -297,7 +276,7 @@ def test_refine_categories_preserves_unmapped():
         Category(name="Chill Vibes", description="Relaxing", song_ids=["t3", "t4"]),
     ]
 
-    result = _refine_categories(client, rough, max_playlists=5)
+    result = refine_categories(client, rough, max_playlists=5)
 
     assert len(result.categories) == 2
     rock = next(c for c in result.categories if c.name == "Rock")

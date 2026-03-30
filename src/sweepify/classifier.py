@@ -201,19 +201,14 @@ def classify_songs(
     on_progress: typing.Callable[[int, int, int], None] | None = None,
     on_batch_start: typing.Callable[[int, int, int], None] | None = None,
     on_batch_done: typing.Callable[[int, ClassificationResult], None] | None = None,
-    on_refine_start: typing.Callable[[], None] | None = None,
-    on_refine_done: typing.Callable[[ClassificationResult], None] | None = None,
     max_playlists: int = DEFAULT_MAX_PLAYLISTS,
     fixed_categories: list[str] | None = None,
     max_workers: int = MAX_WORKERS,
 ) -> ClassificationResult:
     """Classify songs into categories using Claude with parallel batching.
 
-    Two-step process for multi-batch collections:
-    1. Rough classification: batches processed in parallel, each producing independent categories
-    2. Refinement: single API call merges/consolidates rough categories into final set
-
-    Single-batch collections skip step 2. Fixed-categories mode parallelizes but skips refinement.
+    Produces rough categories. For multi-batch runs, call refine_categories()
+    separately to consolidate overlapping categories.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -230,7 +225,7 @@ def classify_songs(
         for batch_num, batch in enumerate(batches, 1):
             on_progress(batch_num, total_batches, len(batch))
 
-    # Single batch: no threading, no refinement
+    # Single batch: no threading
     if total_batches == 1:
         if on_batch_start:
             on_batch_start(1, 1, len(batches[0]))
@@ -242,7 +237,7 @@ def classify_songs(
             on_batch_done(1, result)
         return result
 
-    # Step 1: Parallel rough classification
+    # Parallel classification
     all_categories: list[Category] = []
     lock = threading.Lock()
 
@@ -263,20 +258,7 @@ def classify_songs(
             if on_batch_done:
                 on_batch_done(batch_num, result)
 
-    # Fixed categories: no refinement needed, merge is sufficient
-    if fixed_only:
-        merged = ClassificationResult(categories=all_categories)
-        if on_refine_done:
-            on_refine_done(merged)
-        return merged
-
-    # Step 2: Refinement
-    if on_refine_start:
-        on_refine_start()
-    refined = _refine_categories(client, all_categories, max_playlists=max_playlists)
-    if on_refine_done:
-        on_refine_done(refined)
-    return refined
+    return ClassificationResult(categories=all_categories)
 
 
 def _classify_batch(
@@ -310,7 +292,7 @@ def _classify_batch(
     return ClassificationResult.model_validate(parsed)
 
 
-def _refine_categories(
+def refine_categories(
     client: anthropic.Anthropic,
     rough_categories: list[Category],
     max_playlists: int = DEFAULT_MAX_PLAYLISTS,

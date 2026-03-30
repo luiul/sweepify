@@ -52,7 +52,7 @@ ANTHROPIC_API_KEY=               # only if using anthropic provider
 uv run sweepify run
 ```
 
-This runs all four steps in sequence: fetch, enrich, classify, and create playlists.
+This runs all five steps in sequence: fetch, enrich, classify, refine, and create playlists.
 
 ### Target a specific playlist
 
@@ -65,7 +65,8 @@ uv run sweepify run -p "My Playlist"
 ```bash
 uv run sweepify fetch      # Fetch liked songs from Spotify
 uv run sweepify enrich     # Add AI metadata (mood, BPM, vibe, related artists)
-uv run sweepify classify   # Classify songs using Claude
+uv run sweepify classify   # Rough-classify songs in parallel
+uv run sweepify refine     # Consolidate rough categories into final playlists
 uv run sweepify create     # Create Spotify playlists
 uv run sweepify status     # Show song and classification counts
 uv run sweepify reset      # Clear classifications (keeps songs)
@@ -119,21 +120,22 @@ On your first run, a browser window will open for Spotify authorization. Grant t
 
 1. **Fetch** — Retrieves all Liked Songs (or a specific playlist) via the Spotify API with pagination, enriches them with artist genre data, and stores everything in a local SQLite database.
 2. **Enrich** — Sends unenriched songs (in parallel batches of ~50) to Claude to generate metadata: mood, BPM estimate, vibe phrase, and related artists. Up to 4 batches run concurrently. Progress is saved after each batch.
-3. **Classify** — Two-step parallel process (see below). Songs can appear in up to 4 playlists.
-4. **Create** — Creates private Spotify playlists for each category and adds the songs. Re-running is safe: existing playlists are reused, and already-classified songs are skipped.
+3. **Classify** — Rough-classifies songs in parallel batches (see below). Songs can appear in up to 4 playlists. Results are saved immediately.
+4. **Refine** — Consolidates rough categories into coherent final playlists (see below). Can be re-run independently if interrupted.
+5. **Create** — Creates private Spotify playlists for each category and adds the songs. Re-running is safe: existing playlists are reused, and already-classified songs are skipped.
 
 ### Classification pipeline
 
 Classification uses a two-step approach to balance speed and quality:
 
-**Step 1 — Rough classification (parallel).** Songs are split into batches of ~100 and all batches are sent to Claude concurrently (up to 4 workers). Each batch independently produces its own categories, so overlapping or inconsistent names across batches are expected.
+**`classify`** — Songs are split into batches of ~100 and all batches are sent to Claude concurrently (up to 4 workers). Each batch independently produces its own categories. Results are saved to the database immediately, so progress is preserved if interrupted. Overlapping or inconsistent category names across batches are expected at this stage.
 
-**Step 2 — Refinement (single call).** All rough categories are collected and sent in one API call to Claude, which merges overlapping categories, picks final names, and reassigns every song to 5–N coherent playlists.
+**`refine`** — All rough categories are sent in one API call to Claude, which returns a mapping of which rough categories to merge and what to rename them. Song reassignment happens locally (no song IDs are sent to Claude), so this step is fast. Can be re-run independently if it fails.
 
 Short-circuits:
 
-- **<=100 songs**: Single API call, no refinement needed.
-- **Fixed categories** (`-n 0`): Batches run in parallel but skip refinement since the category names are predetermined.
+- **<=100 songs**: `classify` produces final categories in a single API call. `refine` is not needed.
+- **Fixed categories** (`-n 0`): `classify` batches run in parallel, assigning to predetermined categories. `refine` is not needed.
 
 ## Development
 

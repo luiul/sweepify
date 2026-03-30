@@ -244,9 +244,7 @@ def _do_classify(max_playlists: int) -> str:
 
     total = len(songs)
     total_batches = (total + classifier.BATCH_SIZE - 1) // classifier.BATCH_SIZE
-    # Reserve progress space for refinement step (+1)
-    steps = total_batches + (1 if fixed_categories is None and total_batches > 1 else 0)
-    _update_progress(f"Rough classification: 0/{total_batches} batches", 0.0)
+    _update_progress(f"Classifying: 0/{total_batches} batches", 0.0)
     client = classifier.get_client()
     batches_done = 0
     classified_songs: set[str] = set()
@@ -265,8 +263,8 @@ def _do_classify(max_playlists: int) -> str:
         _check_cancel()
         batch_status[batch_num] = "processing"
         _update_progress(
-            f"Rough classification: {batches_done}/{total_batches} batches{_batch_text()}",
-            batches_done / steps if steps else 0,
+            f"Classifying: {batches_done}/{total_batches} batches{_batch_text()}",
+            batches_done / total_batches if total_batches else 0,
         )
 
     def on_batch_done(batch_num: int, result: classifier.ClassificationResult) -> None:
@@ -274,41 +272,61 @@ def _do_classify(max_playlists: int) -> str:
         _check_cancel()
         batches_done += 1
         batch_status[batch_num] = "done"
-        # Persist rough results so progress is saved if interrupted
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")
             classified_songs.update(cat.song_ids)
         _update_progress(
-            f"Rough classification: {batches_done}/{total_batches} batches{_batch_text()}",
-            batches_done / steps if steps else 0,
+            f"Classifying: {batches_done}/{total_batches} batches{_batch_text()}",
+            batches_done / total_batches if total_batches else 0,
         )
 
-    def on_refine_start() -> None:
-        _check_cancel()
-        _update_progress("Refining categories...", total_batches / steps if steps else 0.9)
-
-    def on_refine_done(result: classifier.ClassificationResult) -> None:
-        # Overwrite rough classifications with refined ones (only for these songs)
-        song_ids = [s.spotify_id for s in songs]
-        db.reset_classifications_for_songs(song_ids)
-        classified_songs.clear()
-        for cat in result.categories:
-            db.mark_classified(cat.song_ids, cat.name, playlist_id="")
-            classified_songs.update(cat.song_ids)
-        _update_progress("Classification complete", 1.0)
-
-    result = classifier.classify_songs(
+    classifier.classify_songs(
         client,
         songs,
         on_batch_start=on_batch_start,
         on_batch_done=on_batch_done,
-        on_refine_start=on_refine_start,
-        on_refine_done=on_refine_done,
         max_playlists=max_playlists,
         fixed_categories=fixed_categories,
     )
+    return f"Classified {len(classified_songs)} song(s) into {len(set(batch_status))} batch(es). Run Refine to consolidate."
+
+
+def _do_refine(max_playlists: int) -> str:
+    from sweepify import classifier, db
+
+    songs_by_cat = db.get_songs_by_category()
+    if not songs_by_cat:
+        return "No unrefined classifications found. Run Classify first."
+
+    rough_categories = [
+        classifier.Category(
+            name=name,
+            description=f"{len(cat_songs)} songs",
+            song_ids=[s.spotify_id for s in cat_songs],
+        )
+        for name, cat_songs in songs_by_cat.items()
+    ]
+
+    all_song_ids = []
+    for cat in rough_categories:
+        all_song_ids.extend(cat.song_ids)
+    unique_ids = list(set(all_song_ids))
+
+    _update_progress(f"Refining {len(rough_categories)} categories...", 0.1)
+    client = classifier.get_client()
+
+    _check_cancel()
+    result = classifier.refine_categories(client, rough_categories, max_playlists=max_playlists)
+
+    db.reset_classifications_for_songs(unique_ids)
+    classified_songs: set[str] = set()
+    for cat in result.categories:
+        db.mark_classified(cat.song_ids, cat.name, playlist_id="")
+        classified_songs.update(cat.song_ids)
+
+    _update_progress("Refinement complete", 1.0)
     summary = ", ".join(f"{c.name} ({len(c.song_ids)})" for c in result.categories)
-    return f"Classified {len(classified_songs)} song(s) into {len(result.categories)} categories: {summary}"
+    return f"Refined into {len(result.categories)} categories ({len(classified_songs)} songs): {summary}"
 
 
 def _do_create() -> str:
@@ -370,10 +388,11 @@ def _do_clear() -> str:
 
 def _do_full_pipeline(playlist: str | None, max_playlists: int) -> str:
     steps = [
-        ("1/4 Fetch", _do_fetch, [playlist]),
-        ("2/4 Enrich", _do_enrich, [False]),
-        ("3/4 Classify", _do_classify, [max_playlists]),
-        ("4/4 Create", _do_create, []),
+        ("1/5 Fetch", _do_fetch, [playlist]),
+        ("2/5 Enrich", _do_enrich, [False]),
+        ("3/5 Classify", _do_classify, [max_playlists]),
+        ("4/5 Refine", _do_refine, [max_playlists]),
+        ("5/5 Create", _do_create, []),
     ]
     results = []
     for label, fn, fn_args in steps:
@@ -444,7 +463,7 @@ if view == "Actions":
     # --- Pipeline steps ---
     st.subheader("Pipeline")
 
-    pipeline_cols = st.columns(4)
+    pipeline_cols = st.columns(5)
     _disabled = _action_is_live  # Disable buttons while action is running
 
     with pipeline_cols[0]:
@@ -463,13 +482,20 @@ if view == "Actions":
 
     with pipeline_cols[2]:
         st.markdown("**3. Classify**")
-        st.caption("Group songs into playlists with AI")
+        st.caption("Rough-classify songs in parallel")
         classify_max = st.number_input("Max playlists", min_value=0, max_value=30, value=10, key="classify_max")
         if st.button("Classify", use_container_width=True, type="primary", disabled=_disabled):
             _run_action("Classify", _do_classify, int(classify_max))
 
     with pipeline_cols[3]:
-        st.markdown("**4. Create**")
+        st.markdown("**4. Refine**")
+        st.caption("Consolidate rough categories")
+        refine_max = st.number_input("Max playlists", min_value=1, max_value=30, value=10, key="refine_max")
+        if st.button("Refine", use_container_width=True, type="primary", disabled=_disabled):
+            _run_action("Refine", _do_refine, int(refine_max))
+
+    with pipeline_cols[4]:
+        st.markdown("**5. Create**")
         st.caption("Push playlists to Spotify")
         if st.button("Create Playlists", use_container_width=True, type="primary", disabled=_disabled):
             _run_action("Create", _do_create)
@@ -478,7 +504,7 @@ if view == "Actions":
 
     # --- Full pipeline ---
     st.subheader("Full Pipeline")
-    st.caption("Run all steps in sequence: fetch, enrich, classify, create.")
+    st.caption("Run all steps in sequence: fetch, enrich, classify, refine, create.")
     run_cols = st.columns([2, 1, 1])
     with run_cols[0]:
         run_playlist = st.text_input("Playlist (optional)", key="run_playlist", placeholder="Liked Songs")
