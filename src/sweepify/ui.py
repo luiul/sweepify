@@ -229,7 +229,6 @@ def _do_classify(max_playlists: int) -> str:
     total = len(songs)
     _update_progress(f"Classifying: 0/{total} songs", 0.0)
     client = classifier.get_client()
-    classified_count = 0
 
     def on_progress(batch: int, total_batches: int, size: int) -> None:
         _check_cancel()
@@ -237,10 +236,8 @@ def _do_classify(max_playlists: int) -> str:
     classified_songs: set[str] = set()
 
     def on_batch_done(result: classifier.ClassificationResult) -> None:
-        nonlocal classified_count
         for cat in result.categories:
             db.mark_classified(cat.song_ids, cat.name, playlist_id="")
-            classified_count += len(cat.song_ids)
             classified_songs.update(cat.song_ids)
         _update_progress(
             f"Classifying: {len(classified_songs)}/{total} songs",
@@ -784,9 +781,10 @@ elif view == "SQL":
     query = st.text_area(
         "Query",
         value=(
-            "SELECT category, COUNT(*) as count FROM songs\n"
+            "SELECT j.value as category, COUNT(*) as count\n"
+            "FROM songs, json_each(categories) as j\n"
             "WHERE classified = 1\n"
-            "GROUP BY category\nORDER BY count DESC;"
+            "GROUP BY j.value\nORDER BY count DESC;"
         ),
         height=120,
     )

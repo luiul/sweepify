@@ -137,8 +137,8 @@ def mark_classified(song_ids: list[str], category: str, playlist_id: str) -> Non
             cats = json.loads(row["categories"]) if row["categories"] else []
             pids = json.loads(row["playlist_ids"]) if row["playlist_ids"] else {}
 
-            # Append category if not already present
-            if category not in cats:
+            # Append category if not already present (max 4 per song)
+            if category not in cats and len(cats) < 4:
                 cats.append(category)
 
             # Record playlist_id mapping
